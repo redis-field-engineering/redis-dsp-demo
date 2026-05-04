@@ -1,0 +1,61 @@
+services:
+  redis:
+    image: redis:8.6-rc1
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6381:6379"
+
+  app:
+    build: .
+    environment:
+      APP_NAME: redis-dsp-demo
+      REDIS_URL: redis://redis:6379/0
+      DATASET_DIR: /workspace/data/generated/synthetic
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: redis-dsp-demo
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local
+      TOP_K: 5
+      MAX_CANDIDATES: 50
+      AUTO_BOOTSTRAP_DATA: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - otel-collector
+    volumes:
+      - ./data/generated:/workspace/data/generated
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "8889:8889"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - app
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
