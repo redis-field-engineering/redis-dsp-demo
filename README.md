@@ -1,14 +1,88 @@
 # Redis DSP Candidate Generation Demo
 
-This repository is a production-shaped local prototype for a Redis-based DSP retrieval and reranking workflow. It demonstrates:
+This repository is a production-shaped local prototype for a Redis-based DSP candidate-generation and reranking workflow. The core demo is built around a synthetic dataset so the full retrieval path, ranking logic, and latency behavior are easy to inspect and reproduce locally.
+
+What the repo demonstrates:
 
 - Redis Set-based candidate generation with explicit inverted indexes
+- Redis Hash-based storage for user and campaign metadata
 - Lightweight in-memory reranking in Python
-- Offline ranking evaluation on synthetic data, a translated Hugging Face `MIND` path, and a derived `FairJob` targeting path
-- Configurable load testing with average, p95, and p99 latency reporting
+- Offline quality evaluation on synthetic data with candidate-recall measurement
+- Serial load testing with average, p95, and p99 latency reporting
+- Optional secondary dataset paths for `MIND` and `FairJob`
 - Local observability with Prometheus, Grafana, and OpenTelemetry
 
-## Architecture
+## Headline Results
+
+Synthetic offline quality:
+
+- `NDCG@K`: `0.9946`
+- `Precision@K`: `0.9001`
+- `Recall@K`: `0.9606`
+- `F1@K`: `0.9113`
+- `Candidate generation recall`: `1.0`
+
+Synthetic retrieval and reranking latency:
+
+- Redis `HGETALL user`:
+  `0.278 ms` average, `0.476 ms` p95, `0.945 ms` p99
+- Redis candidate generation (`SINTER` ladder):
+  `0.568 ms` average, `0.884 ms` p95, `4.128 ms` p99
+- In-memory reranking:
+  `0.023 ms` average, `0.046 ms` p95, `0.073 ms` p99
+
+These numbers are the phase-level timings from the synthetic serving path. They focus on Redis retrieval and reranking rather than full HTTP application latency. The current quality and benchmark summaries live in [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json) and [reports/benchmark_report.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/benchmark_report.md).
+
+## Core Story
+
+The main question in this demo is:
+
+Can Redis Sets retrieve a small, relevant campaign pool fast enough that the hot path stays in low single-digit milliseconds?
+
+The answer from this prototype is yes for the synthetic workload:
+
+- retrieval avoids scanning the full campaign universe
+- the hot path uses a few exact-match Redis operations
+- reranking happens in memory over a small candidate pool
+- quality is strong because the synthetic generator and ranking model are intentionally aligned
+
+## Redis Features Used
+
+The demo relies on a small, explicit subset of Redis functionality:
+
+- `HASH`
+  Used for `user:<id>` and `campaign:<id>` records
+- `SET`
+  Used for inverted indexes such as `idx:geo:*`, `idx:device:*`, and `idx:segment:*`
+- `SINTER`
+  Used for exact-match candidate generation across hard filters and strong user segments
+- `HGETALL`
+  Used to fetch user profiles and campaign metadata
+- pipelining
+  Used when loading data and when campaign hashes are fetched without the in-process cache
+
+This is intentionally simple. The point of the prototype is to show how far a plain set-based inverted index can go before introducing more specialized retrieval layers.
+
+## Key Schema
+
+The synthetic path uses three Redis object families:
+
+- `user:<id>`
+  Redis Hash with user features, interest map, and segment list
+- `campaign:<id>`
+  Redis Hash with targeting metadata, reranking weights, and bid
+- `idx:*`
+  Redis Sets for exact-match retrieval
+
+Example keys:
+
+- `user:u00042`
+- `campaign:c00123`
+- `idx:geo:US`
+- `idx:device:iOS`
+- `idx:segment:camping_high`
+
+## Retrieval Flow
 
 The hot path stays intentionally small:
 
@@ -25,6 +99,48 @@ The hot path stays intentionally small:
    - light frequency penalty
 
 The retrieval path avoids scanning the full campaign universe in the request hot path.
+
+The lookup ladder is intentionally progressive:
+
+1. `geo + device + strongest segments`
+2. `geo + device + strongest single segment`
+3. broader fallback intersections
+4. finally `geo + device`
+
+That preserves recall without turning the request path into a full query engine.
+
+## Synthetic Dataset Design
+
+The synthetic dataset is the primary dataset for this demo because it gives a controlled environment for both latency and ranking quality.
+
+It includes:
+
+- `4000` users by default
+- `2500` campaigns by default
+- `120000` synthetic interactions by default
+- `12` interest features by default
+
+Each synthetic user has:
+
+- coarse exact-match attributes such as `geo` and `device`
+- continuous interest scores
+- derived segment memberships such as `camping_high` or `travel_medium`
+
+Each synthetic campaign has:
+
+- hard filters for `geo` and `device`
+- required segments
+- optional positive and negative segment criteria
+- linear reranking weights
+- bid and freshness attributes
+
+The label generation process is also explicit:
+
+- eligibility is enforced first
+- a latent truth score combines user interests, campaign weights, bid, freshness, and deterministic noise
+- click labels come from the resulting click probability
+
+That is why the synthetic metrics are strong: the dataset is designed to validate the retrieval-plus-rerank architecture, not to act as an adversarial public benchmark.
 
 ## Repository Layout
 
@@ -98,6 +214,34 @@ Load Redis manually:
 python3 -m data.load_redis --dataset-dir data/generated/synthetic
 ```
 
+The generated files are intentionally simple:
+
+- `users.jsonl`
+  request-time user profiles
+- `campaigns.jsonl`
+  campaign metadata and targeting criteria
+- `interactions.parquet`
+  offline evaluation table
+- `metadata.json`
+  dataset size and generator parameters
+
+## Measured Results
+
+The current synthetic benchmark snapshot is:
+
+- offline quality:
+  `NDCG@K 0.9946`, `Precision@K 0.9001`, `Recall@K 0.9606`, `F1@K 0.9113`
+- candidate-generation recall:
+  `1.0`
+- Redis `HGETALL user`:
+  `0.278 ms` average, `0.476 ms` p95, `0.945 ms` p99
+- Redis candidate generation:
+  `0.568 ms` average, `0.884 ms` p95, `4.128 ms` p99
+- in-memory reranking:
+  `0.023 ms` average, `0.046 ms` p95, `0.073 ms` p99
+
+The app also records a full per-request timing breakdown internally, but the primary README latency story is now focused on Redis retrieval and reranking rather than HTTP/framework overhead.
+
 ## Ranking API
 
 Example request:
@@ -144,6 +288,8 @@ Recommended benchmarking modes:
 - `--mode serial` for honest single-shard latency measurement
 - `--mode concurrent` for application-layer concurrency testing
 
+For this repo, `serial` is the primary benchmark mode because the local demo uses a single Redis instance and a single serving process by default.
+
 ## Ranking Evaluation
 
 Run offline evaluation:
@@ -162,9 +308,11 @@ Metrics reported:
 - `F1@K`
 - candidate-generation recall before reranking
 
-Synthetic evaluation uses the repo’s noisy latent click model. The MIND path translates recommendation impressions into the same abstract user/campaign/label domain. The FairJob path derives Redis-friendly targeting criteria from historical response lift and evaluates retrieval plus reranking against observed impression slates.
+Synthetic evaluation is the primary quality readout for the demo. The MIND and FairJob paths are useful secondary checks, but they are not the main performance story.
 
 ## Hugging Face MIND Translation
+
+This is an auxiliary path, not the main benchmark.
 
 The translated public dataset path uses `Recommenders/MIND` from Hugging Face.
 
@@ -190,6 +338,8 @@ python3 -m data.huggingface_adapter \
 ```
 
 ## FairJob Targeting Translation
+
+This is an auxiliary path that demonstrates how ad-like public click data can be mapped into the same Redis retrieval abstraction.
 
 The FairJob path uses `criteo/FairJob` from Hugging Face and maps it into the demo schema like this:
 
