@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 
 from app.models import Campaign, UserProfile
-from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS
+from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES
 
 
 def build_candidate_lookup_keys(
@@ -23,39 +23,11 @@ def build_union_probe_candidate_lookup_keys(
     strong_signal_count: int = 2,
 ) -> list[list[str]]:
     strong_segments = user.segments[:strong_signal_count]
-    strict_base = [
-        f"idx:card_tier:{user.card_tier}",
-        f"idx:geo:{user.geo}",
-        f"idx:device_type:{user.device_type}",
-        f"idx:device:{user.device}",
-    ]
+    strict_base = _base_lookup_keys(user)
     keys: list[list[str]] = []
-    segment_probe_patterns = [
-        strict_base,
-        strict_base[:-1],
-        [strict_base[0], strict_base[1], strict_base[3]],
-        [strict_base[0], strict_base[1]],
-        strict_base[1:],
-        [strict_base[1], strict_base[2]],
-        [strict_base[1], strict_base[3]],
-        [strict_base[1]],
-        [],
-    ]
-    for base_keys in segment_probe_patterns:
-        for segment_key in segment_keys(strong_segments):
-            keys.append([*base_keys, segment_key] if base_keys else [segment_key])
-    keys.extend(
-        [
-            strict_base,
-            strict_base[:-1],
-            [strict_base[0], strict_base[1], strict_base[3]],
-            [strict_base[0], strict_base[1]],
-            strict_base[1:],
-            [strict_base[1], strict_base[2]],
-            [strict_base[1], strict_base[3]],
-            [strict_base[1]],
-        ]
-    )
+    for segment_key in segment_keys(strong_segments):
+        keys.append([*strict_base, segment_key])
+    keys.append(strict_base)
     return _dedupe_key_groups(keys)
 
 
@@ -64,12 +36,7 @@ def build_naive_candidate_lookup_keys(
     strong_signal_count: int = 2,
 ) -> list[list[str]]:
     strong_segments = user.segments[:strong_signal_count]
-    strict_base = [
-        f"idx:card_tier:{user.card_tier}",
-        f"idx:geo:{user.geo}",
-        f"idx:device_type:{user.device_type}",
-        f"idx:device:{user.device}",
-    ]
+    strict_base = _base_lookup_keys(user)
     keys: list[list[str]] = []
     if strong_segments:
         segment_group = segment_keys(strong_segments)
@@ -77,30 +44,10 @@ def build_naive_candidate_lookup_keys(
         keys.extend(
             [
                 [*strict_base, *segment_group],
-                [*strict_base[:-1], *segment_group],
-                [strict_base[0], strict_base[1], strict_base[3], *segment_group],
-                [strict_base[0], strict_base[1], *segment_group],
                 [*strict_base, first_segment_key],
-                [*strict_base[:-1], first_segment_key],
-                [strict_base[0], strict_base[1], strict_base[3], first_segment_key],
-                [strict_base[0], strict_base[1], first_segment_key],
-                [strict_base[1], first_segment_key],
-                [strict_base[3], first_segment_key],
-                [first_segment_key],
             ]
         )
-    keys.extend(
-        [
-            strict_base,
-            strict_base[:-1],
-            [strict_base[0], strict_base[1], strict_base[3]],
-            [strict_base[0], strict_base[1]],
-            strict_base[1:],
-            [strict_base[1], strict_base[2]],
-            [strict_base[1], strict_base[3]],
-            [strict_base[1]],
-        ]
-    )
+    keys.append(strict_base)
     return _dedupe_key_groups(keys)
 
 
@@ -169,6 +116,8 @@ def build_indexes(campaigns: Sequence[Campaign]) -> dict[str, set[str]]:
     for campaign in campaigns:
         for geo in _expand_dimension(campaign.geo, GEOS):
             indexes.setdefault(f"idx:geo:{geo}", set()).add(campaign.campaign_id)
+        for state in _expand_dimension(campaign.geo_states or ["*"], STATES):
+            indexes.setdefault(f"idx:state:{state}", set()).add(campaign.campaign_id)
         for card_tier in _expand_dimension(campaign.card_tiers, CARD_TIERS):
             indexes.setdefault(f"idx:card_tier:{card_tier}", set()).add(campaign.campaign_id)
         for device in _expand_dimension(campaign.device, DEVICE_OSES):
@@ -234,3 +183,15 @@ def _expand_dimension(values: Iterable[str], vocabulary: Sequence[str]) -> list[
     if not concrete_values or "*" in concrete_values:
         return list(vocabulary)
     return concrete_values
+
+
+def _base_lookup_keys(user: UserProfile) -> list[str]:
+    keys = [
+        f"idx:card_tier:{user.card_tier}",
+        f"idx:geo:{user.geo}",
+        f"idx:device_type:{user.device_type}",
+        f"idx:device:{user.device}",
+    ]
+    if user.state:
+        keys.insert(2, f"idx:state:{user.state}")
+    return keys

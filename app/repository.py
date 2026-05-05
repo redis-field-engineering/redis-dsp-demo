@@ -89,34 +89,36 @@ class RedisRepository:
         strategy: str = "union_probe",
     ) -> tuple[list[str], int]:
         if strategy == "union_probe":
-            probe_results: list[list[str]] = []
-            round_trips = 0
-            for key_group in build_candidate_lookup_keys(
+            key_groups = build_candidate_lookup_keys(
                 user,
                 strong_signal_count=strong_signal_count,
                 strategy=strategy,
-            ):
-                result = self.client.sinter(key_group)
-                round_trips += 1
-                if result:
-                    probe_results.append(sorted(result))
+            )
+            pipeline = self.client.pipeline(transaction=False)
+            for key_group in key_groups:
+                pipeline.sinter(key_group)
+            payloads = pipeline.execute()
+            probe_results = [sorted(result) for result in payloads if result]
+            round_trips = 1 if key_groups else 0
             return _merge_probe_results(probe_results, max_candidates=max_candidates), round_trips
 
-        combined: list[str] = []
-        seen: set[str] = set()
-        round_trips = 0
-        for key_group in build_candidate_lookup_keys(
+        key_groups = build_candidate_lookup_keys(
             user,
             strong_signal_count=strong_signal_count,
             strategy=strategy,
-        ):
-            result = self.client.sinter(key_group)
-            round_trips += 1
+        )
+        pipeline = self.client.pipeline(transaction=False)
+        for key_group in key_groups:
+            pipeline.sinter(key_group)
+        payloads = pipeline.execute()
+        combined: list[str] = []
+        seen: set[str] = set()
+        for result in payloads:
             for campaign_id in sorted(result):
                 if campaign_id in seen:
                     continue
                 seen.add(campaign_id)
                 combined.append(campaign_id)
                 if len(combined) >= max_candidates:
-                    return combined, round_trips
-        return combined, round_trips
+                    return combined, 1 if key_groups else 0
+        return combined, 1 if key_groups else 0

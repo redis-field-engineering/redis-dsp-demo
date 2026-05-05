@@ -20,17 +20,17 @@ The benchmark uses the current full synthetic dataset:
 
 Source: [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
 
-- `NDCG@K`: `0.917`
-- `Precision@K`: `0.9901`
-- `Recall@K`: `0.2594`
-- `F1@K`: `0.4007`
-- `Candidate generation recall`: `0.4704`
+- `NDCG@K`: `0.978`
+- `Precision@K`: `0.9984`
+- `Recall@K`: `0.2668`
+- `F1@K`: `0.4093`
+- `Candidate generation recall`: `0.9372`
 
 Interpretation:
 
 - the exact-filter MAID path still produces very high top-of-list precision
-- recall is now meaningfully constrained by retrieval
-- this is a more realistic outcome than the earlier near-perfect synthetic path
+- candidate recall is high again after reducing the probe plan and adding state-aware retrieval
+- the remaining recall gap is mostly top-K truncation, not candidate-domain loss
 
 ## Serial Live Load Test
 
@@ -47,41 +47,42 @@ Method:
 
 Results:
 
-- requests: `232`
+- requests: `226`
 - success rate: `1.0`
-- throughput: `15.45 RPS`
-- client latency: `31.788 ms` avg, `88.044 ms` p95, `194.165 ms` p99
-- server latency: `25.953 ms` avg, `77.929 ms` p95, `184.283 ms` p99
-- handler latency: `23.486 ms` avg, `72.582 ms` p95, `174.359 ms` p99
+- throughput: `15.06 RPS`
+- client latency: `21.789 ms` avg, `59.984 ms` p95, `211.566 ms` p99
+- server latency: `12.201 ms` avg, `40.602 ms` p95, `92.058 ms` p99
+- handler latency: `7.903 ms` avg, `24.846 ms` p95, `52.034 ms` p99
 
 ## Phase Timing Breakdown
 
 Sampled from live `/rank` responses over `150` serial requests:
 
-- identity + MAID fetch: `2.957 ms` avg, `3.298 ms` p95, `24.525 ms` p99
-- candidate generation: `15.276 ms` avg, `36.878 ms` p95, `108.828 ms` p99
-- campaign materialization: `0.029 ms` avg, `0.09 ms` p95, `0.225 ms` p99
-- reranking: `0.065 ms` avg, `0.12 ms` p95, `0.335 ms` p99
-- total handler time: `18.526 ms` avg, `48.383 ms` p95, `164.494 ms` p99
-- Redis round trips: `28` avg, `28` p95, `28` p99
+- identity + MAID fetch: `2.241 ms` avg, `5.997 ms` p95, `12.307 ms` p99
+- candidate generation: `2.327 ms` avg, `5.955 ms` p95, `13.021 ms` p99
+- campaign materialization: `0.393 ms` avg, `0.855 ms` p95, `7.697 ms` p99
+- reranking: `0.263 ms` avg, `0.805 ms` p95, `2.227 ms` p99
+- total handler time: `6.358 ms` avg, `20.229 ms` p95, `41.678 ms` p99
+- Redis round trips: `3` avg, `3` p95, `3` p99
 
 ## Conclusion
 
 What works well:
 
 - identity-token resolution is functional and fast enough not to dominate the request
+- candidate generation is now low-single-digit milliseconds on average
 - campaign materialization is effectively free because campaign metadata is cached in memory
 - reranking is negligible
 - the demo now looks much closer to the intended MAID/ad-cache retrieval problem
 
 What is limiting the current system:
 
-- candidate generation is now the dominant latency cost
-- candidate recall is materially lower than the earlier synthetic story
-- the current set-probing plan is still too expensive and too lossy for the stricter exact-filter model
+- the handler average is now under `10 ms`, but the tail is still above that target
+- remaining p95/p99 latency is mostly request-level variability, not candidate-generation cost
+- the end-to-end HTTP p95/p99 still includes framework and container overhead on top of the handler
 
 The next optimization work should focus on:
 
-1. reducing candidate-generation round trips
-2. improving candidate recall before reranking
-3. deciding which exact filters should move earlier into retrieval without exploding index cost
+1. reducing MAID fetch and deserialization cost
+2. deciding whether frequency state should move to a separate hot-path structure
+3. evaluating a server-side Redis Function to collapse identity resolution and candidate retrieval into one execution

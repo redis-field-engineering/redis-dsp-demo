@@ -32,6 +32,7 @@ STATES_BY_COUNTRY = {
     "GB": ["ENG", "SCT"],
     "AU": ["NSW", "VIC"],
 }
+STATES = sorted({state for states in STATES_BY_COUNTRY.values() for state in states})
 POSTAL_CODES_BY_STATE = {
     "CA": ["90001", "94105"],
     "CO": ["80014", "80202"],

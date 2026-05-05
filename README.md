@@ -151,43 +151,45 @@ The synthetic comparison artifact is in [reports/retrieval_strategy_comparison.m
 
 Current offline evaluation on the full synthetic MAID dataset (`4000` MAIDs, `2500` campaigns, `120000` interactions):
 
-- `NDCG@K`: `0.917`
-- `Precision@K`: `0.9901`
-- `Recall@K`: `0.2594`
-- `F1@K`: `0.4007`
-- `Candidate generation recall`: `0.4704`
+- `NDCG@K`: `0.978`
+- `Precision@K`: `0.9984`
+- `Recall@K`: `0.2668`
+- `F1@K`: `0.4093`
+- `Candidate generation recall`: `0.9372`
 
 The important takeaway is that the updated exact-filter model is much stricter than the older segment-only synthetic path:
 
 - top-ranked survivors are still high precision
-- candidate recall is now the limiting factor
-- retrieval quality is no longer artificially near-perfect on the larger dataset
+- candidate recall recovered strongly after tightening the probe planner
+- the remaining recall limit is mostly top-K truncation, not candidate loss
 
 ## Live Serial Latency
 
 Current live benchmark on the rebuilt local stack, using serial requests against the identity-token path:
 
 - client HTTP latency:
-  `31.788 ms` average, `88.044 ms` p95, `194.165 ms` p99
+  `21.789 ms` average, `59.984 ms` p95, `211.566 ms` p99
 - server process latency:
-  `25.953 ms` average, `77.929 ms` p95, `184.283 ms` p99
+  `12.201 ms` average, `40.602 ms` p95, `92.058 ms` p99
 - handler latency:
-  `23.486 ms` average, `72.582 ms` p95, `174.359 ms` p99
+  `7.903 ms` average, `24.846 ms` p95, `52.034 ms` p99
 
 Phase timing sampled from live `/rank` responses:
 
 - identity + MAID fetch:
-  `2.957 ms` average, `3.298 ms` p95, `24.525 ms` p99
+  `2.241 ms` average, `5.997 ms` p95, `12.307 ms` p99
 - candidate generation:
-  `15.276 ms` average, `36.878 ms` p95, `108.828 ms` p99
+  `2.327 ms` average, `5.955 ms` p95, `13.021 ms` p99
 - campaign materialization:
-  `0.029 ms` average, `0.09 ms` p95, `0.225 ms` p99
+  `0.393 ms` average, `0.855 ms` p95, `7.697 ms` p99
 - reranking:
-  `0.065 ms` average, `0.12 ms` p95, `0.335 ms` p99
+  `0.263 ms` average, `0.805 ms` p95, `2.227 ms` p99
 - total handler time:
-  `18.526 ms` average, `48.383 ms` p95, `164.494 ms` p99
+  `6.358 ms` average, `20.229 ms` p95, `41.678 ms` p99
+- Redis round trips:
+  `3` average, `3` p95, `3` p99
 
-The current bottleneck is clearly candidate generation, not reranking or campaign fetch.
+The current hot path is much tighter than the earlier MAID revision. Candidate generation is no longer the dominant problem; the remaining tail is mostly request-level variability across MAID fetch, candidate retrieval, and application overhead.
 
 ## Repository Layout
 

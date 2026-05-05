@@ -1,4 +1,4 @@
-from app.candidate import build_indexes, filter_campaigns_for_user, generate_candidates_in_memory
+from app.candidate import build_candidate_lookup_keys, build_indexes, filter_campaigns_for_user, generate_candidates_in_memory
 from app.models import Campaign, UserProfile
 
 
@@ -32,6 +32,46 @@ def test_generate_candidates_uses_strong_segments() -> None:
     indexes = build_indexes(campaigns)
     results = generate_candidates_in_memory(user, indexes, max_candidates=10, strong_signal_count=2)
     assert results[:2] == ["c1", "c2"]
+
+
+def test_union_probe_uses_compact_probe_plan() -> None:
+    user = UserProfile(
+        user_id="u1b",
+        geo="US",
+        state="CO",
+        device="iOS",
+        device_type="mobile",
+        card_tier="Gold",
+        age_bucket="25-34",
+        interests={"camping": 0.9, "travel": 0.7},
+        segments=["camping_high", "travel_high"],
+    )
+    keys = build_candidate_lookup_keys(user, strong_signal_count=2, strategy="union_probe")
+    assert keys == [
+        [
+            "idx:card_tier:Gold",
+            "idx:geo:US",
+            "idx:state:CO",
+            "idx:device_type:mobile",
+            "idx:device:iOS",
+            "idx:segment:camping_high",
+        ],
+        [
+            "idx:card_tier:Gold",
+            "idx:geo:US",
+            "idx:state:CO",
+            "idx:device_type:mobile",
+            "idx:device:iOS",
+            "idx:segment:travel_high",
+        ],
+        [
+            "idx:card_tier:Gold",
+            "idx:geo:US",
+            "idx:state:CO",
+            "idx:device_type:mobile",
+            "idx:device:iOS",
+        ]
+    ]
 
 
 def test_filter_campaigns_supports_any_of_and_none_of() -> None:

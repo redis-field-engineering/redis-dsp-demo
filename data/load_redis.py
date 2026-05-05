@@ -6,7 +6,7 @@ from pathlib import Path
 from redis import Redis
 
 from app.models import Campaign, UserProfile
-from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, read_jsonl
+from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES, read_jsonl
 
 
 def load_dataset_into_redis(client: Redis, dataset_dir: Path) -> None:
@@ -39,6 +39,9 @@ def load_dataset_into_redis(client: Redis, dataset_dir: Path) -> None:
         pending_commands += 1
         for geo in _expand_dimension(campaign.geo, GEOS):
             pipeline.sadd(f"idx:geo:{geo}", campaign.campaign_id)
+            pending_commands += 1
+        for state in _expand_dimension(campaign.geo_states or ["*"], STATES):
+            pipeline.sadd(f"idx:state:{state}", campaign.campaign_id)
             pending_commands += 1
         for card_tier in _expand_dimension(campaign.card_tiers, CARD_TIERS):
             pipeline.sadd(f"idx:card_tier:{card_tier}", campaign.campaign_id)
