@@ -242,6 +242,39 @@ The current synthetic benchmark snapshot is:
 
 The app also records a full per-request timing breakdown internally, but the primary README latency story is now focused on Redis retrieval and reranking rather than HTTP/framework overhead.
 
+## Retrieval Strategy Comparison
+
+The repo now includes a direct comparison between two candidate-generation strategies on a richer synthetic dataset that includes:
+
+- wildcard geo/device campaigns
+- `any_of_segments`
+- `none_of_segments`
+- more multi-interest users
+
+Strategies compared:
+
+- `naive`
+  intersects multiple top user-interest buckets together early
+- `union_probe`
+  probes strong user-interest buckets separately, merges candidates round-robin, and preserves more recall
+
+Current comparison snapshot from [reports/retrieval_strategy_comparison.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/retrieval_strategy_comparison.md):
+
+- `naive`
+  `NDCG@K 0.9368`, `Candidate generation recall 0.3443`
+- `union_probe`
+  `NDCG@K 0.966`, `Candidate generation recall 0.5344`
+- delta
+  `+0.1901` candidate-generation recall and `+0.0292` NDCG@K for `union_probe`
+
+Run the comparison locally:
+
+```bash
+python3 -m experiments.compare_retrieval_strategies \
+  --dataset-dir data/generated/synthetic_retrieval_compare \
+  --output reports/generated/retrieval_strategy_comparison.json
+```
+
 ## Ranking API
 
 Example request:
