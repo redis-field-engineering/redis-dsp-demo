@@ -40,7 +40,12 @@ def f1_at_k(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def evaluate_synthetic(dataset_dir: Path, top_k: int = 5, sample_users: int = 250) -> dict[str, float]:
+def evaluate_synthetic(
+    dataset_dir: Path,
+    top_k: int = 5,
+    sample_users: int = 250,
+    strategy: str = "union_probe",
+) -> dict[str, float]:
     users = [UserProfile.model_validate(item) for item in read_jsonl(dataset_dir / "users.jsonl")]
     campaigns = [Campaign.model_validate(item) for item in read_jsonl(dataset_dir / "campaigns.jsonl")]
     campaign_by_id = {campaign.campaign_id: campaign for campaign in campaigns}
@@ -63,7 +68,13 @@ def evaluate_synthetic(dataset_dir: Path, top_k: int = 5, sample_users: int = 25
         if not relevant_ids:
             continue
         evaluated += 1
-        candidate_ids = generate_candidates_in_memory(user, indexes, max_candidates=200, strong_signal_count=2)
+        candidate_ids = generate_candidates_in_memory(
+            user,
+            indexes,
+            max_candidates=200,
+            strong_signal_count=2,
+            strategy=strategy,
+        )
         candidate_recalls.append(len(set(candidate_ids) & relevant_ids) / len(relevant_ids))
         candidate_campaigns = filter_campaigns_for_user(
             user,
@@ -86,6 +97,7 @@ def evaluate_synthetic(dataset_dir: Path, top_k: int = 5, sample_users: int = 25
 
     return {
         "users_evaluated": evaluated,
+        "strategy": strategy,
         "ndcg_at_k": round(mean(ndcgs), 4) if ndcgs else 0.0,
         "precision_at_k": round(mean(precisions), 4) if precisions else 0.0,
         "recall_at_k": round(mean(recalls), 4) if recalls else 0.0,
@@ -153,6 +165,7 @@ def evaluate_interaction_dataset(
     top_k: int,
     sample_users: int,
     randomized_only: bool,
+    strategy: str = "union_probe",
 ) -> dict[str, float]:
     users = {
         user.user_id: user
@@ -185,7 +198,13 @@ def evaluate_interaction_dataset(
         evaluated += 1
         if evaluated > sample_users:
             break
-        candidate_ids = generate_candidates_in_memory(user, indexes, max_candidates=200, strong_signal_count=2)
+        candidate_ids = generate_candidates_in_memory(
+            user,
+            indexes,
+            max_candidates=200,
+            strong_signal_count=2,
+            strategy=strategy,
+        )
         candidate_recalls.append(len(set(candidate_ids) & relevant_ids) / len(relevant_ids))
 
         displayed_candidate_ids = [campaign_id for campaign_id in candidate_ids if campaign_id in displayed_ids]
@@ -205,6 +224,7 @@ def evaluate_interaction_dataset(
 
     return {
         "queries_evaluated": evaluated,
+        "strategy": strategy,
         "ndcg_at_k": round(mean(ndcgs), 4) if ndcgs else 0.0,
         "precision_at_k": round(mean(precisions), 4) if precisions else 0.0,
         "recall_at_k": round(mean(recalls), 4) if recalls else 0.0,

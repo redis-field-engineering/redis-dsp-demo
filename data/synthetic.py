@@ -34,6 +34,8 @@ def generate_users(config: SyntheticConfig) -> list[UserProfile]:
         if not segments:
             feature, value = ranked_features[0]
             segments = [f"{feature}_{'high' if value > 0.5 else 'medium'}"]
+        min_segment_count = min(3, len(segments))
+        max_segment_count = min(5, len(segments))
         users.append(
             UserProfile(
                 user_id=f"u{index:05d}",
@@ -41,7 +43,7 @@ def generate_users(config: SyntheticConfig) -> list[UserProfile]:
                 device=random.choice(DEVICES),
                 age_bucket=random.choice(AGE_BUCKETS),
                 interests=interests,
-                segments=segments[: random.randint(1, 5)],
+                segments=segments[: random.randint(min_segment_count, max_segment_count)],
                 impression_count=random.randint(0, 300),
             )
         )
@@ -56,13 +58,61 @@ def generate_campaigns(config: SyntheticConfig) -> list[Campaign]:
     for index in range(config.num_campaigns):
         targeted_features = random.sample(features, k=random.randint(4, min(8, len(features))))
         weights = {feature: round(random.uniform(-0.4, 1.4), 4) for feature in targeted_features}
-        required_segments = random.sample(segment_vocab, k=random.randint(1, 3))
+        top_positive_features = [
+            feature
+            for feature, weight in sorted(weights.items(), key=lambda item: item[1], reverse=True)
+            if weight > 0.35
+        ]
+        if not top_positive_features:
+            top_positive_features = [max(weights, key=weights.get)]
+        random.shuffle(top_positive_features)
+
+        targeting_pattern = random.random()
+        required_segments: list[str] = []
+        any_of_segments: list[str] = []
+        none_of_segments: list[str] = []
+
+        if targeting_pattern < 0.25:
+            required_segments = random.sample(segment_vocab, k=random.randint(1, 2))
+        elif targeting_pattern < 0.7:
+            any_of_count = random.randint(min(2, len(top_positive_features)), min(4, len(top_positive_features)))
+            any_of_segments = [
+                f"{feature}_{random.choice(['medium', 'high'])}"
+                for feature in top_positive_features[:any_of_count]
+            ]
+            required_segments = random.sample(any_of_segments, k=1) if random.random() < 0.35 else []
+        else:
+            required_segments = [
+                f"{top_positive_features[0]}_{random.choice(['medium', 'high'])}"
+            ]
+            remaining_positive_features = top_positive_features[1:] or top_positive_features[:1]
+            any_of_count = random.randint(1, min(3, len(remaining_positive_features)))
+            any_of_segments = [
+                f"{feature}_{random.choice(['medium', 'high'])}"
+                for feature in remaining_positive_features[:any_of_count]
+            ]
+
+        negative_features = [
+            feature
+            for feature, weight in sorted(weights.items(), key=lambda item: item[1])
+            if weight < 0.0
+        ]
+        if negative_features and random.random() < 0.45:
+            none_of_segments = [
+                f"{feature}_{random.choice(['medium', 'high'])}"
+                for feature in negative_features[: random.randint(1, min(2, len(negative_features)))]
+            ]
+
+        geo = ["*"] if random.random() < 0.18 else random.sample(GEOS, k=random.randint(1, 2))
+        device = ["*"] if random.random() < 0.18 else random.sample(DEVICES, k=random.randint(1, 2))
         campaigns.append(
             Campaign(
                 campaign_id=f"c{index:05d}",
-                geo=random.sample(GEOS, k=random.randint(1, 2)),
-                device=random.sample(DEVICES, k=random.randint(1, 2)),
+                geo=geo,
+                device=device,
                 required_segments=required_segments,
+                any_of_segments=_unique(any_of_segments, exclude=required_segments),
+                none_of_segments=_unique(none_of_segments, exclude=required_segments + any_of_segments),
                 weights=weights,
                 bid=round(random.uniform(0.5, 4.0), 3),
                 freshness_boost=round(random.uniform(0.0, 0.6), 3),
@@ -128,6 +178,10 @@ def generate_dataset(
         "num_interactions": num_interactions,
         "feature_count": feature_count,
         "seed": seed,
+        "wildcard_geo_campaigns": sum("*" in campaign.geo for campaign in campaigns),
+        "wildcard_device_campaigns": sum("*" in campaign.device for campaign in campaigns),
+        "any_of_campaigns": sum(bool(campaign.any_of_segments) for campaign in campaigns),
+        "none_of_campaigns": sum(bool(campaign.none_of_segments) for campaign in campaigns),
     }
     (dataset_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -155,6 +209,18 @@ def ensure_synthetic_dataset(
         num_interactions=num_interactions,
         feature_count=feature_count,
     )
+
+
+def _unique(values: list[str], exclude: list[str] | None = None) -> list[str]:
+    excluded = set(exclude or [])
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in excluded or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def main() -> None:

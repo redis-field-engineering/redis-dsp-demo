@@ -5,7 +5,7 @@ from pathlib import Path
 
 from redis import Redis
 
-from app.candidate import build_candidate_lookup_keys
+from app.candidate import build_candidate_lookup_keys, _merge_probe_results
 from app.models import Campaign, UserProfile
 from data.load_redis import load_dataset_into_redis
 from data.synthetic import ensure_synthetic_dataset
@@ -80,11 +80,30 @@ class RedisRepository:
         *,
         max_candidates: int,
         strong_signal_count: int,
+        strategy: str = "union_probe",
     ) -> tuple[list[str], int]:
+        if strategy == "union_probe":
+            probe_results: list[list[str]] = []
+            round_trips = 0
+            for key_group in build_candidate_lookup_keys(
+                user,
+                strong_signal_count=strong_signal_count,
+                strategy=strategy,
+            ):
+                result = self.client.sinter(key_group)
+                round_trips += 1
+                if result:
+                    probe_results.append(sorted(result))
+            return _merge_probe_results(probe_results, max_candidates=max_candidates), round_trips
+
         combined: list[str] = []
         seen: set[str] = set()
         round_trips = 0
-        for key_group in build_candidate_lookup_keys(user, strong_signal_count=strong_signal_count):
+        for key_group in build_candidate_lookup_keys(
+            user,
+            strong_signal_count=strong_signal_count,
+            strategy=strategy,
+        ):
             result = self.client.sinter(key_group)
             round_trips += 1
             for campaign_id in sorted(result):

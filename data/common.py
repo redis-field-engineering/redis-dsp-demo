@@ -76,8 +76,8 @@ def click_label(user: UserProfile, campaign: Campaign) -> int:
 def campaign_is_eligible(user: UserProfile, campaign: Campaign) -> bool:
     user_segments = set(user.segments)
     return (
-        user.geo in campaign.geo
-        and user.device in campaign.device
+        _matches_dimension(user.geo, campaign.geo)
+        and _matches_dimension(user.device, campaign.device)
         and set(campaign.required_segments).issubset(user_segments)
         and (not campaign.any_of_segments or bool(user_segments.intersection(campaign.any_of_segments)))
         and not user_segments.intersection(campaign.none_of_segments)
@@ -95,3 +95,7 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+def _matches_dimension(user_value: str, campaign_values: list[str]) -> bool:
+    return user_value in campaign_values or "*" in campaign_values
