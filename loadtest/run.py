@@ -48,6 +48,8 @@ async def run_load_test(
     concurrency: int,
     warmup_seconds: int = 3,
     mode: str = "concurrent",
+    rank_mode: str = "hybrid_precompute_plus_realtime",
+    shadow_modes: list[str] | None = None,
 ) -> dict[str, float | int]:
     client = httpx.AsyncClient(
         base_url=base_url,
@@ -59,6 +61,21 @@ async def run_load_test(
     latencies: list[float] = []
     server_process_latencies: list[float] = []
     handler_latencies: list[float] = []
+    identity_resolution_latencies: list[float] = []
+    profile_fetch_latencies: list[float] = []
+    user_fetch_latencies: list[float] = []
+    candidate_generation_latencies: list[float] = []
+    campaign_fetch_latencies: list[float] = []
+    filtering_latencies: list[float] = []
+    validated_candidate_latencies: list[float] = []
+    decision_path_latencies: list[float] = []
+    rerank_latencies: list[float] = []
+    redis_round_trips: list[int] = []
+    mode_redis_round_trips: list[int] = []
+    sinter_ops: list[int] = []
+    candidate_counts: list[int] = []
+    eligible_counts: list[int] = []
+    overlap_buckets: dict[str, list[float]] = {}
     measured_successes = 0
     measured_failures = 0
     total_successes = 0
@@ -67,11 +84,17 @@ async def run_load_test(
     interval_seconds = 1.0 / max(target_rps, 1)
     warmup_stop_at = started + max(warmup_seconds, 0)
     measured_stop_at = warmup_stop_at + duration_seconds
+    requested_shadow_modes = shadow_modes or []
 
     async def one_request(measure: bool) -> None:
         nonlocal measured_successes, measured_failures, total_successes, total_failures
         async with semaphore:
-            request_body = sample_user()
+            request_body = {
+                **sample_user(),
+                "mode": rank_mode,
+            }
+            if requested_shadow_modes:
+                request_body["shadow_modes"] = requested_shadow_modes
             begin = time.perf_counter()
             try:
                 response = await client.post("/rank", json=request_body)
@@ -79,6 +102,24 @@ async def run_load_test(
                 if measure:
                     latencies.append(latency_ms)
                     _record_server_timings(response, server_process_latencies, handler_latencies)
+                    _record_response_details(
+                        response,
+                        identity_resolution_latencies=identity_resolution_latencies,
+                        profile_fetch_latencies=profile_fetch_latencies,
+                        user_fetch_latencies=user_fetch_latencies,
+                        candidate_generation_latencies=candidate_generation_latencies,
+                        campaign_fetch_latencies=campaign_fetch_latencies,
+                        filtering_latencies=filtering_latencies,
+                        validated_candidate_latencies=validated_candidate_latencies,
+                        decision_path_latencies=decision_path_latencies,
+                        rerank_latencies=rerank_latencies,
+                        redis_round_trips=redis_round_trips,
+                        mode_redis_round_trips=mode_redis_round_trips,
+                        sinter_ops=sinter_ops,
+                        candidate_counts=candidate_counts,
+                        eligible_counts=eligible_counts,
+                        overlap_buckets=overlap_buckets,
+                    )
                 if response.status_code == 200:
                     total_successes += 1
                     if measure:
@@ -128,6 +169,8 @@ async def run_load_test(
     elapsed = max(time.perf_counter() - warmup_stop_at, 1e-6)
     results: dict[str, float | int] = {
         "mode": mode,
+        "rank_mode": rank_mode,
+        "shadow_modes": requested_shadow_modes,
         "requests": len(latencies),
         "successes": measured_successes,
         "failures": measured_failures,
@@ -155,6 +198,52 @@ async def run_load_test(
                 "handler_p99_latency_ms": round(percentile(handler_latencies, 0.99), 3),
             }
         )
+    if user_fetch_latencies:
+        results.update(
+            {
+                "identity_resolution_avg_latency_ms": round(statistics.mean(identity_resolution_latencies), 3),
+                "identity_resolution_p95_latency_ms": round(percentile(identity_resolution_latencies, 0.95), 3),
+                "identity_resolution_p99_latency_ms": round(percentile(identity_resolution_latencies, 0.99), 3),
+                "profile_fetch_avg_latency_ms": round(statistics.mean(profile_fetch_latencies), 3),
+                "profile_fetch_p95_latency_ms": round(percentile(profile_fetch_latencies, 0.95), 3),
+                "profile_fetch_p99_latency_ms": round(percentile(profile_fetch_latencies, 0.99), 3),
+                "user_fetch_avg_latency_ms": round(statistics.mean(user_fetch_latencies), 3),
+                "user_fetch_p95_latency_ms": round(percentile(user_fetch_latencies, 0.95), 3),
+                "user_fetch_p99_latency_ms": round(percentile(user_fetch_latencies, 0.99), 3),
+                "candidate_generation_avg_latency_ms": round(statistics.mean(candidate_generation_latencies), 3),
+                "candidate_generation_p95_latency_ms": round(percentile(candidate_generation_latencies, 0.95), 3),
+                "candidate_generation_p99_latency_ms": round(percentile(candidate_generation_latencies, 0.99), 3),
+                "campaign_fetch_avg_latency_ms": round(statistics.mean(campaign_fetch_latencies), 3),
+                "campaign_fetch_p95_latency_ms": round(percentile(campaign_fetch_latencies, 0.95), 3),
+                "campaign_fetch_p99_latency_ms": round(percentile(campaign_fetch_latencies, 0.99), 3),
+                "filtering_avg_latency_ms": round(statistics.mean(filtering_latencies), 3),
+                "filtering_p95_latency_ms": round(percentile(filtering_latencies, 0.95), 3),
+                "filtering_p99_latency_ms": round(percentile(filtering_latencies, 0.99), 3),
+                "validated_candidate_p50_latency_ms": round(percentile(validated_candidate_latencies, 0.50), 3),
+                "validated_candidate_p95_latency_ms": round(percentile(validated_candidate_latencies, 0.95), 3),
+                "validated_candidate_p99_latency_ms": round(percentile(validated_candidate_latencies, 0.99), 3),
+                "decision_path_p50_latency_ms": round(percentile(decision_path_latencies, 0.50), 3),
+                "decision_path_p95_latency_ms": round(percentile(decision_path_latencies, 0.95), 3),
+                "decision_path_p99_latency_ms": round(percentile(decision_path_latencies, 0.99), 3),
+                "rerank_avg_latency_ms": round(statistics.mean(rerank_latencies), 3),
+                "rerank_p95_latency_ms": round(percentile(rerank_latencies, 0.95), 3),
+                "rerank_p99_latency_ms": round(percentile(rerank_latencies, 0.99), 3),
+                "avg_redis_round_trips": round(statistics.mean(redis_round_trips), 3),
+                "p95_redis_round_trips": round(percentile([float(value) for value in redis_round_trips], 0.95), 3),
+                "avg_mode_redis_round_trips": round(statistics.mean(mode_redis_round_trips), 3),
+                "p95_mode_redis_round_trips": round(percentile([float(value) for value in mode_redis_round_trips], 0.95), 3),
+                "avg_sinter_ops": round(statistics.mean(sinter_ops), 3),
+                "p95_sinter_ops": round(percentile([float(value) for value in sinter_ops], 0.95), 3),
+                "avg_candidate_count": round(statistics.mean(candidate_counts), 3),
+                "avg_eligible_count": round(statistics.mean(eligible_counts), 3),
+            }
+        )
+    if overlap_buckets:
+        results["avg_mode_overlaps"] = {
+            key: round(statistics.mean(values), 4)
+            for key, values in overlap_buckets.items()
+            if values
+        }
     return results
 
 
@@ -182,6 +271,85 @@ def _record_server_timings(
             pass
 
 
+def _record_response_details(
+    response: httpx.Response,
+    *,
+    identity_resolution_latencies: list[float],
+    profile_fetch_latencies: list[float],
+    user_fetch_latencies: list[float],
+    candidate_generation_latencies: list[float],
+    campaign_fetch_latencies: list[float],
+    filtering_latencies: list[float],
+    validated_candidate_latencies: list[float],
+    decision_path_latencies: list[float],
+    rerank_latencies: list[float],
+    redis_round_trips: list[int],
+    mode_redis_round_trips: list[int],
+    sinter_ops: list[int],
+    candidate_counts: list[int],
+    eligible_counts: list[int],
+    overlap_buckets: dict[str, list[float]],
+) -> None:
+    try:
+        payload: dict[str, Any] = response.json()
+    except Exception:
+        return
+    timing = payload.get("timing")
+    if isinstance(timing, dict):
+        identity_ms = _append_float(timing.get("identity_resolution_ms"), identity_resolution_latencies)
+        profile_ms = _append_float(timing.get("profile_fetch_ms"), profile_fetch_latencies)
+        _append_float(timing.get("user_fetch_ms"), user_fetch_latencies)
+        candidate_ms = _append_float(timing.get("candidate_generation_ms"), candidate_generation_latencies)
+        campaign_ms = _append_float(timing.get("campaign_fetch_ms"), campaign_fetch_latencies)
+        filtering_ms = _append_float(timing.get("filtering_ms"), filtering_latencies)
+        validated_ms = _append_float(timing.get("validated_candidate_ms"), validated_candidate_latencies)
+        rerank_ms = _append_float(timing.get("rerank_ms"), rerank_latencies)
+        if None not in (identity_ms, profile_ms, candidate_ms, campaign_ms, filtering_ms, rerank_ms):
+            decision_path_latencies.append(
+                identity_ms + profile_ms + candidate_ms + campaign_ms + filtering_ms + rerank_ms
+            )
+    _append_int(payload.get("redis_round_trips"), redis_round_trips)
+
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        _append_int(diagnostics.get("redis_round_trips"), mode_redis_round_trips)
+        _append_int(diagnostics.get("sinter_ops"), sinter_ops)
+        _append_int(diagnostics.get("final_candidate_count"), candidate_counts)
+        _append_int(diagnostics.get("eligible_count"), eligible_counts)
+
+    overlaps = payload.get("mode_overlaps")
+    if not isinstance(overlaps, list):
+        return
+    for overlap in overlaps:
+        if not isinstance(overlap, dict):
+            continue
+        mode_name = overlap.get("mode")
+        if not isinstance(mode_name, str):
+            continue
+        candidate_key = f"{mode_name}.candidate_jaccard"
+        top_key = f"{mode_name}.top_result_jaccard"
+        overlap_buckets.setdefault(candidate_key, [])
+        overlap_buckets.setdefault(top_key, [])
+        _append_float(overlap.get("candidate_jaccard"), overlap_buckets[candidate_key])
+        _append_float(overlap.get("top_result_jaccard"), overlap_buckets[top_key])
+
+
+def _append_float(value: Any, bucket: list[float]) -> float | None:
+    try:
+        parsed = float(value)
+        bucket.append(parsed)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def _append_int(value: Any, bucket: list[int]) -> None:
+    try:
+        bucket.append(int(value))
+    except (TypeError, ValueError):
+        return
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a configurable DSP load test")
     parser.add_argument("--base-url", default="http://localhost:8000")
@@ -191,6 +359,8 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--warmup-seconds", type=int, default=3)
     parser.add_argument("--mode", choices=["serial", "concurrent"], default="concurrent")
+    parser.add_argument("--rank-mode", default="hybrid_precompute_plus_realtime")
+    parser.add_argument("--shadow-mode", action="append", default=[])
     parser.add_argument("--output", type=Path, default=Path("reports/generated/loadtest.json"))
     args = parser.parse_args()
 
@@ -213,6 +383,8 @@ def main() -> None:
             concurrency=args.concurrency,
             warmup_seconds=args.warmup_seconds,
             mode=args.mode,
+            rank_mode=args.rank_mode,
+            shadow_modes=args.shadow_mode,
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

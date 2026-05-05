@@ -6,6 +6,22 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+FULL_REALTIME_MODE = "full_realtime"
+PRECOMPUTED_SEGMENT_MODE = "precomputed_segment"
+HYBRID_MODE = "hybrid_precompute_plus_realtime"
+HYBRID_BITMAP_MODE = "hybrid_bitmap_gating"
+MAID_BRUTEFORCE_SINTER_MODE = "maid_bruteforce_sinter"
+MAID_TIGHTENED_SINTER_MODE = "maid_tightened_sinter"
+CANDIDATE_MODES = [
+    FULL_REALTIME_MODE,
+    PRECOMPUTED_SEGMENT_MODE,
+    HYBRID_MODE,
+    HYBRID_BITMAP_MODE,
+    MAID_BRUTEFORCE_SINTER_MODE,
+    MAID_TIGHTENED_SINTER_MODE,
+]
+
+
 class UserProfile(BaseModel):
     user_id: str
     geo: str
@@ -59,6 +75,35 @@ class UserProfile(BaseModel):
                 str(key): int(value)
                 for key, value in json.loads(values.get("frequency_history_json", "{}")).items()
             },
+            impression_count=int(values.get("impression_count", 0)),
+        )
+
+
+class ScoringProfile(BaseModel):
+    user_id: str
+    interests: dict[str, float]
+    impression_count: int = 0
+
+    def to_redis_hash(self) -> dict[str, str]:
+        return {
+            "user_id": self.user_id,
+            "interests_json": json.dumps(self.interests, sort_keys=True),
+            "impression_count": str(self.impression_count),
+        }
+
+    @classmethod
+    def from_user_profile(cls, user: "UserProfile") -> "ScoringProfile":
+        return cls(
+            user_id=user.user_id,
+            interests=dict(user.interests),
+            impression_count=user.impression_count,
+        )
+
+    @classmethod
+    def from_redis_hash(cls, values: dict[str, Any]) -> "ScoringProfile":
+        return cls(
+            user_id=str(values["user_id"]),
+            interests=json.loads(values["interests_json"]),
             impression_count=int(values.get("impression_count", 0)),
         )
 
@@ -132,6 +177,8 @@ class Campaign(BaseModel):
 class RankRequest(BaseModel):
     user_id: str | None = None
     identity_token: str | None = None
+    mode: str = Field(default=HYBRID_MODE)
+    shadow_modes: list[str] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=25)
     max_candidates: int | None = Field(default=None, ge=10, le=1000)
 
@@ -143,19 +190,44 @@ class ScoredCandidate(BaseModel):
 
 
 class TimingBreakdown(BaseModel):
+    identity_resolution_ms: float = 0.0
+    profile_fetch_ms: float = 0.0
     user_fetch_ms: float
     candidate_generation_ms: float
     campaign_fetch_ms: float
+    filtering_ms: float = 0.0
+    validated_candidate_ms: float = 0.0
     rerank_ms: float
     total_ms: float
 
 
+class ModeDiagnostics(BaseModel):
+    mode: str
+    candidate_ids: list[str]
+    final_candidate_count: int
+    eligible_count: int
+    redis_round_trips: int
+    sinter_ops: int = 0
+    timing: TimingBreakdown
+    top_campaign_ids: list[str]
+
+
+class ModeOverlap(BaseModel):
+    mode: str
+    candidate_jaccard: float
+    top_result_jaccard: float
+
+
 class RankResponse(BaseModel):
+    mode: str
     user_id: str
     candidate_ids: list[str]
     top_results: list[ScoredCandidate]
     timing: TimingBreakdown
     redis_round_trips: int
+    diagnostics: ModeDiagnostics | None = None
+    shadow_results: list[ModeDiagnostics] = Field(default_factory=list)
+    mode_overlaps: list[ModeOverlap] = Field(default_factory=list)
 
 
 class BatchScoreRequest(BaseModel):

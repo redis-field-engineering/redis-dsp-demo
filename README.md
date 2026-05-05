@@ -1,32 +1,40 @@
 # Redis DSP Candidate Generation Demo
 
-This repository is a production-shaped local prototype for a Redis-based DSP retrieval and reranking workflow. The primary path is now a synthetic, identity-driven dataset that models:
+This repository is a production-shaped local prototype for a Redis-based DSP retrieval and reranking workflow. The primary path is a synthetic, identity-driven dataset that models:
 
 - a neutral `MAID`-style profile cache
 - publisher-scoped identity tokens that resolve into a profile
 - an active ad cache with explicit targeting and delivery constraints
-- Redis Set-based candidate generation plus in-memory reranking
+- three side-by-side candidate selection modes:
+  - `full_realtime`
+  - `precomputed_segment`
+  - `hybrid_precompute_plus_realtime`
 
-The goal is to keep the request path simple and inspectable while getting closer to the real ad-tech retrieval problem.
+The goal is to compare quality and latency tradeoffs using plain Redis primitives, without introducing Redis Search.
 
 ## Core Story
 
-The main synthetic flow is:
+The synthetic benchmark compares three execution styles over the same MAID and campaign dataset:
 
-1. accept an `identity_token` on the request
-2. resolve that token to a synthetic `MAID`
-3. fetch the MAID profile from Redis
-4. retrieve candidate campaigns from Redis inverted indexes
-5. apply exact campaign eligibility in the app
-6. rerank the survivors in memory
+1. `full_realtime`
+   - fetch the MAID
+   - evaluate the full campaign cache at request time
+2. `precomputed_segment`
+   - fetch a prebuilt per-MAID candidate list
+   - apply only minimal live gating
+3. `hybrid_precompute_plus_realtime`
+   - fetch a prebuilt candidate list
+   - apply live pacing, budget, frequency, and exact targeting
+   - rerank the survivors
 
-This keeps the current demo grounded in plain Redis primitives without introducing Redis Search.
+This makes the latency and recall tradeoffs measurable instead of theoretical.
 
 ## What The Repo Demonstrates
 
 - Redis Hash-based storage for MAID profiles and campaign records
 - Redis String-based identity resolution from `identity:<token>` to `maid:<id>`
-- Redis Set-based inverted indexes for country, device OS, device type, card tier, and segments
+- Redis String-based precomputed per-MAID candidate lists for hybrid retrieval
+- Redis Set-based inverted indexes for country, state, device OS, device type, card tier, and segments
 - explicit ad filtering for:
   - `card_tier`
   - `country`
@@ -39,8 +47,9 @@ This keeps the current demo grounded in plain Redis primitives without introduci
   - `frequency_cap`
   - segment `required` / `any_of` / `none_of`
 - lightweight in-memory reranking in Python
-- offline quality evaluation on synthetic data
-- local load testing and observability
+- offline mode comparison against a full real-time baseline
+- serial live load tests by mode
+- optional shadow execution for live overlap measurement
 - secondary public-dataset adapters for `MIND` and `FairJob`
 
 ## Synthetic Dataset Design
@@ -77,11 +86,12 @@ Generated files:
 
 - `maids.jsonl`
 - `identity_map.jsonl`
+- `user_candidates.jsonl`
 - `campaigns.jsonl`
 - `interactions.parquet`
 - `metadata.json`
 
-For compatibility with some older utilities, the generator also writes `users.jsonl`.
+For compatibility with older utilities, the generator also writes `users.jsonl`.
 
 ## Redis Features Used
 
@@ -89,112 +99,163 @@ The demo intentionally relies on a narrow Redis feature set:
 
 - `HASH`
   - `maid:<id>`
+  - `maid_hot:<id>`
   - `campaign:<id>`
+  - `campaign_state:<id>`
+  - `fcap:{maid_id} -> {campaign_id: delivery_count}`
 - `STRING`
   - `identity:<token> -> maid_id`
+  - `aud:<maid_id> -> [campaign_ids]`
+- `BITMAP`
+  - `bm:active`
+  - `bm:pacing_ok`
+  - `bm:budget_ok`
+  - `bm:servable`
 - `SET`
   - `idx:geo:<country>`
+  - `idx:state:<state>`
   - `idx:card_tier:<tier>`
   - `idx:device_type:<type>`
   - `idx:device:<os>`
   - `idx:segment:<segment>`
 - `SINTER`
   - exact-match candidate generation across hard filters and strong segments
-- `HGETALL`
-  - profile and campaign reads
+- `HMGET`
+  - compact scoring profile fields, per-MAID frequency counters, and mutable campaign state fields
 - pipelining
-  - batch campaign fetch and bulk data load
+  - batch candidate probes, metadata reads, and bulk data load
 
 No Redis Search or secondary indexing engine is used in the current mainline demo.
 
-## Retrieval Flow
+## Hybrid Mode Design
 
-The hot path is now identity-driven:
+### Batch Layer
 
-1. `GET identity:<token>` resolves the synthetic identity token to a MAID.
-2. `HGETALL maid:<id>` fetches the full MAID profile.
-3. Candidate generation probes small inverted-index intersections built from:
-   - `card_tier`
-   - `country`
-   - `device_type`
-   - `device_os`
-   - strong user segments
-4. Candidate campaign hashes are fetched in one batch.
-5. Exact filtering applies the broader campaign rules:
-   - geo hierarchy
-   - device hierarchy
-   - card tier
-   - pacing
-   - frequency cap
-   - segment logic
-6. Remaining campaigns are reranked in memory.
+The batch step evaluates the full static targeting expression for each MAID against the active campaign set. In this branch, “static” means:
 
-The request model accepts either:
+- geo, state, and postal targeting
+- device type and OS targeting
+- card tier targeting
+- segment `required` / `any_of` / `none_of`
 
-- `identity_token`
-- `user_id`
+It writes:
 
-The preferred synthetic path is `identity_token`.
+- `aud:{maid_id}` with the ordered campaign IDs that match that MAID’s static targeting
+- `meta:precomputed_candidate_version` as provenance for the current batch snapshot
 
-## Candidate Generation Strategies
+For the current local workflow, versioning is informational rather than operational. We fully reload the Redis dataset, so old versions do not need online cleanup. If we later switch to live swaps, the right pattern is versioned prefixes plus TTL or `UNLINK` after the active pointer moves.
 
-The repo still includes two retrieval planners:
+### Incremental Layer
 
-- `naive`
-  - intersects multiple top user-interest segments too early
-- `union_probe`
-  - probes strong segments separately and merges results round-robin
+Mutable delivery state stays live in Redis:
 
-The synthetic comparison artifact is in [reports/retrieval_strategy_comparison.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/retrieval_strategy_comparison.md).
+- `campaign_state:{id}` for pacing, budget, and status
+- `fcap:{maid_id}` hash for per-user delivery counters
+- `bm:servable` bitmap for global active+pacing+budget eligibility
+
+That lets the hybrid mode push the expensive static matching into batch while still enforcing live delivery constraints online.
+
+### Request Flow
+
+At request time, the hybrid mode does:
+
+1. `GET identity:<token>` to resolve the incoming identifier into a `maid_id`
+2. `HMGET maid_hot:<id> user_id interests_json impression_count` to fetch only the scoring signals needed online
+3. `GET aud:<maid_id>` for the precomputed candidate campaign list
+4. server-side bitmap gating against `bm:servable`
+5. campaign metadata fetch plus `HMGET fcap:{maid_id} <campaign_ids...>`
+6. exact frequency-cap check and in-memory reranking with the `maid_hot` signals
+
+`shadow_modes` are supported on the request so the hybrid path can be compared live against `full_realtime` and `precomputed_segment` without changing the returned mode.
 
 ## Current Synthetic Snapshot
 
-Current offline evaluation on the full synthetic MAID dataset (`4000` MAIDs, `2500` campaigns, `120000` interactions):
+Source artifacts:
 
-- `NDCG@K`: `0.978`
-- `Precision@K`: `0.9984`
-- `Recall@K`: `0.2668`
-- `F1@K`: `0.4093`
-- `Candidate generation recall`: `0.9372`
+- [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
+- [reports/generated/hybrid_benchmark.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/hybrid_benchmark.json)
+- [reports/generated/hybrid_shadow_smoke.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/hybrid_shadow_smoke.json)
+- [reports/benchmark_report.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/benchmark_report.md)
 
-The important takeaway is that the updated exact-filter model is much stricter than the older segment-only synthetic path:
+Offline comparison on the full synthetic dataset (`4000` MAIDs, `2500` campaigns, `120000` interactions):
 
-- top-ranked survivors are still high precision
-- candidate recall recovered strongly after tightening the probe planner
-- the remaining recall limit is mostly top-K truncation, not candidate loss
+- `full_realtime`
+  - `NDCG@K 0.9813`
+  - `candidate recall 1.0`
+  - `avg candidate count 2500`
+- `precomputed_segment`
+  - `NDCG@K 0.9813`
+  - `candidate recall 1.0`
+  - `top-result Jaccard vs full 1.0`
+- `hybrid_precompute_plus_realtime`
+  - `NDCG@K 0.9813`
+  - `candidate recall 1.0`
+  - `top-result Jaccard vs full 1.0`
 
-## Live Serial Latency
+The key result is that once batch computes the full static targeting selection per MAID, the precomputed modes preserve the full real-time ranking output exactly while only looking at about `30` candidates instead of `2500`.
 
-Current live benchmark on the rebuilt local stack, using serial requests against the identity-token path:
+## Native VM Latency
 
-- client HTTP latency:
-  `21.789 ms` average, `59.984 ms` p95, `211.566 ms` p99
-- server process latency:
-  `12.201 ms` average, `40.602 ms` p95, `92.058 ms` p99
-- handler latency:
-  `7.903 ms` average, `24.846 ms` p95, `52.034 ms` p99
+Serial live load on a dedicated GCP VM with native `redis-server` and native `uvicorn`:
 
-Phase timing sampled from live `/rank` responses:
+- VM shape: `n2-standard-8`
+- Redis: native `redis-server 7.0.15`
+- app host: native Python 3.11 process
 
-- identity + MAID fetch:
-  `2.241 ms` average, `5.997 ms` p95, `12.307 ms` p99
-- candidate generation:
-  `2.327 ms` average, `5.955 ms` p95, `13.021 ms` p99
-- campaign materialization:
-  `0.393 ms` average, `0.855 ms` p95, `7.697 ms` p99
-- reranking:
-  `0.263 ms` average, `0.805 ms` p95, `2.227 ms` p99
-- total handler time:
-  `6.358 ms` average, `20.229 ms` p95, `41.678 ms` p99
-- Redis round trips:
-  `3` average, `3` p95, `3` p99
+Decision-path latency from the current benchmark run:
 
-The current hot path is much tighter than the earlier MAID revision. Candidate generation is no longer the dominant problem; the remaining tail is mostly request-level variability across MAID fetch, candidate retrieval, and application overhead.
+- `maid_bruteforce_sinter`
+  - decision path `18.074 ms` p50, `50.945 ms` p99
+  - validated candidates `16.985 ms` p50, `37.519 ms` p99
+  - average mode Redis round trips `28`
+- `maid_tightened_sinter`
+  - decision path `4.299 ms` p50, `5.379 ms` p99
+  - validated candidates `3.162 ms` p50, `3.858 ms` p99
+  - average mode Redis round trips `3`
+- `precomputed_segment`
+  - decision path `2.687 ms` p50, `4.484 ms` p99
+  - validated candidates `1.522 ms` p50, `2.324 ms` p99
+  - average mode Redis round trips `3`
+- `hybrid_precompute_plus_realtime`
+  - decision path `2.733 ms` p50, `4.812 ms` p99
+  - validated candidates `1.596 ms` p50, `2.146 ms` p99
+  - average mode Redis round trips `3`
+- `hybrid_bitmap_gating`
+  - decision path `1.939 ms` p50, `3.344 ms` p99
+  - validated candidates `0.831 ms` p50, `1.095 ms` p99
+  - candidate generation `0.457 ms` avg, `0.593 ms` p99
+  - average mode Redis round trips `2`
+
+Shadow execution smoke test for hybrid mode:
+
+- average overlap vs `full_realtime`: `1.0` top-result Jaccard
+- average overlap vs `precomputed_segment`: `1.0` top-result Jaccard
+
+With direct per-MAID candidate lists, the main tradeoff changes:
+
+- `full_realtime` remains the baseline but is much too expensive online
+- `precomputed_segment` and `hybrid` preserve the same ranking output as `full_realtime` on the synthetic dataset
+- the bitmap-gated variant is currently the best live path because it eliminates campaign-state fanout and collapses frequency lookups into a single per-MAID hash
+- on a native VM, identity resolution, `maid_hot` fetch, candidate lookup, and campaign fetch all fall into sub-millisecond or low-single-digit-millisecond behavior instead of the noisier local-container tails
+
+## Reproducing The VM Benchmark
+
+The tested GCP Terraform scaffold is in [terraform/gcp/README.md](/Users/jeremy.plichta/work/mastercard-dsp/terraform/gcp/README.md).
+
+The benchmark flow on the VM is:
+
+1. Provision the VM with Terraform from `terraform/gcp`.
+2. Transfer the repo snapshot or clone the repo onto the VM.
+3. Create a venv and install the package with `pip install -e .`.
+4. Generate the synthetic dataset with `data.synthetic.generate_dataset(...)`.
+5. Load Redis with `python3 data/load_redis.py --redis-url redis://127.0.0.1:6379/0 --dataset-dir data/generated/synthetic`.
+6. Run the app with `REDIS_URL=redis://127.0.0.1:6379/0 python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+7. Run `python3 experiments/benchmark.py --base-url http://127.0.0.1:8000 --dataset-dir data/generated/synthetic --output reports/benchmark_report.md > reports/generated/hybrid_benchmark.json`.
 
 ## Repository Layout
 
-- `app/`: FastAPI service, Redis repository, candidate generation, ranking, instrumentation
-- `data/`: synthetic generator, Redis loader, public dataset adapters
+- `app/`: FastAPI service, Redis repository, candidate generation, hybrid execution, ranking, instrumentation
+- `data/`: synthetic generator, hybrid precompute builder, Redis loader, public dataset adapters
 - `experiments/`: offline evaluation and benchmark helpers
 - `loadtest/`: configurable load driver
 - `observability/`: Prometheus, Grafana, and OTel collector configs
@@ -262,6 +323,15 @@ Run the offline evaluator:
 python3 -m experiments.evaluate --dataset-dir data/generated/synthetic
 ```
 
+Run the mode benchmark:
+
+```bash
+python3 -m experiments.benchmark \
+  --base-url http://127.0.0.1:8001 \
+  --dataset-dir data/generated/synthetic \
+  --output reports/benchmark_report.md
+```
+
 ## Notebooks
 
 The main walkthrough sequence is now:
@@ -270,11 +340,6 @@ The main walkthrough sequence is now:
 - [02_redis_key_schema.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/02_redis_key_schema.ipynb)
 - [03_ranking_evaluation.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/03_ranking_evaluation.ipynb)
 - [06_boolean_targeting_walkthrough.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/06_boolean_targeting_walkthrough.ipynb)
+- [07_hybrid_mode_comparison.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/07_hybrid_mode_comparison.ipynb)
 
-`MIND` and `FairJob` remain useful secondary comparisons, but the primary demo story is now the synthetic MAID + identity + explicit ad-filter path.
-
-Fresh benchmark artifacts from the current stack are in:
-
-- [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
-- [reports/generated/loadtest.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/loadtest.json)
-- [reports/benchmark_report.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/benchmark_report.md)
+`MIND` and `FairJob` remain useful secondary comparisons, but the main demo story is now the synthetic identity-driven benchmark and the hybrid retrieval mode.

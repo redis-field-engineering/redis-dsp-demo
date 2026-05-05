@@ -74,6 +74,22 @@ def test_union_probe_uses_compact_probe_plan() -> None:
     ]
 
 
+def test_legacy_union_probe_uses_26_sinter_plan() -> None:
+    user = UserProfile(
+        user_id="u1c",
+        geo="US",
+        state="CO",
+        device="iOS",
+        device_type="mobile",
+        card_tier="Gold",
+        age_bucket="25-34",
+        interests={"camping": 0.9, "travel": 0.7},
+        segments=["camping_high", "travel_high"],
+    )
+    keys = build_candidate_lookup_keys(user, strong_signal_count=2, strategy="legacy_union_probe")
+    assert len(keys) == 26
+
+
 def test_filter_campaigns_supports_any_of_and_none_of() -> None:
     user = UserProfile(
         user_id="u2",

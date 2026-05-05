@@ -1,0 +1,9 @@
+project_id         = "your-gcp-project-id"
+region             = "us-central1"
+zone               = "us-central1-a"
+name               = "redis-dsp-bench"
+machine_type       = "n2-standard-8"
+ssh_user           = "redisbench"
+ssh_public_key     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@example.com"
+allowed_ssh_cidrs  = ["203.0.113.10/32"]
+allowed_app_cidrs  = ["203.0.113.10/32"]

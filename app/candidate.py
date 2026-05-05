@@ -11,6 +11,8 @@ def build_candidate_lookup_keys(
     strong_signal_count: int = 2,
     strategy: str = "union_probe",
 ) -> list[list[str]]:
+    if strategy == "legacy_union_probe":
+        return build_legacy_union_probe_candidate_lookup_keys(user, strong_signal_count=strong_signal_count)
     if strategy == "naive":
         return build_naive_candidate_lookup_keys(user, strong_signal_count=strong_signal_count)
     if strategy == "union_probe":
@@ -28,6 +30,47 @@ def build_union_probe_candidate_lookup_keys(
     for segment_key in segment_keys(strong_segments):
         keys.append([*strict_base, segment_key])
     keys.append(strict_base)
+    return _dedupe_key_groups(keys)
+
+
+def build_legacy_union_probe_candidate_lookup_keys(
+    user: UserProfile,
+    strong_signal_count: int = 2,
+) -> list[list[str]]:
+    strong_segments = user.segments[:strong_signal_count]
+    strict_base = [
+        f"idx:card_tier:{user.card_tier}",
+        f"idx:geo:{user.geo}",
+        f"idx:device_type:{user.device_type}",
+        f"idx:device:{user.device}",
+    ]
+    keys: list[list[str]] = []
+    segment_probe_patterns = [
+        strict_base,
+        strict_base[:-1],
+        [strict_base[0], strict_base[1], strict_base[3]],
+        [strict_base[0], strict_base[1]],
+        strict_base[1:],
+        [strict_base[1], strict_base[2]],
+        [strict_base[1], strict_base[3]],
+        [strict_base[1]],
+        [],
+    ]
+    for base_keys in segment_probe_patterns:
+        for segment_key in segment_keys(strong_segments):
+            keys.append([*base_keys, segment_key] if base_keys else [segment_key])
+    keys.extend(
+        [
+            strict_base,
+            strict_base[:-1],
+            [strict_base[0], strict_base[1], strict_base[3]],
+            [strict_base[0], strict_base[1]],
+            strict_base[1:],
+            [strict_base[1], strict_base[2]],
+            [strict_base[1], strict_base[3]],
+            [strict_base[1]],
+        ]
+    )
     return _dedupe_key_groups(keys)
 
 
@@ -58,7 +101,7 @@ def generate_candidates_in_memory(
     strong_signal_count: int = 2,
     strategy: str = "union_probe",
 ) -> list[str]:
-    if strategy == "union_probe":
+    if strategy in {"union_probe", "legacy_union_probe"}:
         probe_results: list[list[str]] = []
         for key_group in build_candidate_lookup_keys(
             user,

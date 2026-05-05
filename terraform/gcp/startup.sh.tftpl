@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y \
+  build-essential \
+  ca-certificates \
+  curl \
+  git \
+  htop \
+  jq \
+  pkg-config \
+  python3 \
+  python3-pip \
+  python3-venv \
+  redis-server \
+  unzip
+
+systemctl enable redis-server
+systemctl restart redis-server
+
+sysctl -w vm.overcommit_memory=1
+printf 'vm.overcommit_memory=1\n' >/etc/sysctl.d/99-redis-benchmark.conf
+sysctl --system
+
+install -d -m 0755 -o ${ssh_user} -g ${ssh_user} /home/${ssh_user}/workspace
+

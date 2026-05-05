@@ -27,6 +27,7 @@ from data.common import (
     truth_score,
     write_jsonl,
 )
+from data.hybrid_precompute import build_hybrid_precompute_artifacts
 
 
 def generate_users(config: SyntheticConfig) -> list[UserProfile]:
@@ -222,6 +223,12 @@ def generate_dataset(
     users = generate_users(config)
     campaigns = generate_campaigns(config)
     interactions = generate_interactions(users, campaigns, config)
+    precompute = build_hybrid_precompute_artifacts(
+        users=users,
+        campaigns=campaigns,
+        candidate_limit=150,
+        version=f"v{seed}_{num_campaigns}_{feature_count}",
+    )
     write_jsonl(dataset_dir / "users.jsonl", [user.model_dump() for user in users])
     write_jsonl(dataset_dir / "maids.jsonl", [user.model_dump() for user in users])
     write_jsonl(
@@ -231,6 +238,10 @@ def generate_dataset(
             for user in users
             for identity_token in user.identity_tokens
         ],
+    )
+    write_jsonl(
+        dataset_dir / "user_candidates.jsonl",
+        precompute["user_candidates"],
     )
     write_jsonl(dataset_dir / "campaigns.jsonl", [campaign.model_dump() for campaign in campaigns])
     interactions.to_parquet(dataset_dir / "interactions.parquet", index=False)
@@ -249,6 +260,8 @@ def generate_dataset(
         "state_targeted_campaigns": sum(bool(campaign.geo_states) for campaign in campaigns),
         "postal_targeted_campaigns": sum(bool(campaign.geo_postal_codes) for campaign in campaigns),
         "paused_campaigns": sum(campaign.pacing_status != "active" for campaign in campaigns),
+        "precomputed_candidate_version": precompute["version"],
+        "precomputed_user_candidate_rows": len(precompute["user_candidates"]),
     }
     (dataset_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -264,6 +277,7 @@ def ensure_synthetic_dataset(
     required = [
         dataset_dir / "maids.jsonl",
         dataset_dir / "identity_map.jsonl",
+        dataset_dir / "user_candidates.jsonl",
         dataset_dir / "campaigns.jsonl",
         dataset_dir / "interactions.parquet",
         dataset_dir / "metadata.json",

@@ -21,3 +21,14 @@ reports/generated/
 dist/
 build/
 redis-requirements.pdf
+hybrid_prompt.md
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform.tfvars
+terraform.tfvars.json
