@@ -38,10 +38,16 @@ class RedisRepository:
             self._load_campaign_cache()
 
     def fetch_user(self, user_id: str) -> tuple[UserProfile | None, int]:
-        payload = self.client.hgetall(f"user:{user_id}")
+        payload = self.client.hgetall(f"maid:{user_id}")
+        if not payload:
+            payload = self.client.hgetall(f"user:{user_id}")
         if not payload:
             return None, 1
         return UserProfile.from_redis_hash(payload), 1
+
+    def resolve_identity(self, identity_token: str) -> tuple[str | None, int]:
+        maid_id = self.client.get(f"identity:{identity_token}")
+        return (str(maid_id) if maid_id else None), 1
 
     def fetch_campaigns(self, campaign_ids: Sequence[str]) -> tuple[list[Campaign], int]:
         if not campaign_ids:

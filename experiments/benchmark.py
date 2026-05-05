@@ -63,14 +63,23 @@ def main() -> None:
     synthetic = evaluate_synthetic(args.dataset_dir)
     mind = evaluate_mind_translation(args.mind_output_dir)
     fairjob = evaluate_fairjob_translation(args.fairjob_output_dir)
-    users = read_jsonl(args.dataset_dir / "users.jsonl")
+    user_path = args.dataset_dir / "maids.jsonl"
+    if not user_path.exists():
+        user_path = args.dataset_dir / "users.jsonl"
+    users = read_jsonl(user_path)
+    identifiers = [
+        {"identity_token": user["identity_tokens"][0]}
+        if user.get("identity_tokens")
+        else {"user_id": user["user_id"]}
+        for user in users
+    ]
 
     import asyncio
 
     loadtest = asyncio.run(
         run_load_test(
             base_url=args.base_url,
-            user_ids=[user["user_id"] for user in users],
+            identifiers=identifiers,
             duration_seconds=15,
             target_rps=20,
             concurrency=20,

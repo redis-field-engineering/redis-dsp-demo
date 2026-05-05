@@ -26,7 +26,32 @@ FEATURES = [
     "beauty",
 ]
 GEOS = ["US", "CA", "GB", "AU"]
-DEVICES = ["iOS", "Android", "Web", "CTV"]
+STATES_BY_COUNTRY = {
+    "US": ["CA", "CO", "FL", "IL", "NY", "TX"],
+    "CA": ["BC", "ON", "QC"],
+    "GB": ["ENG", "SCT"],
+    "AU": ["NSW", "VIC"],
+}
+POSTAL_CODES_BY_STATE = {
+    "CA": ["90001", "94105"],
+    "CO": ["80014", "80202"],
+    "FL": ["33101", "33602"],
+    "IL": ["60601", "60611"],
+    "NY": ["10001", "10018"],
+    "TX": ["73301", "77001"],
+    "BC": ["V5K0A1", "V6B1A1"],
+    "ON": ["M5H2N2", "M4B1B3"],
+    "QC": ["H2Y1C6", "G1R5M1"],
+    "ENG": ["SW1A1AA", "M11AE"],
+    "SCT": ["EH12NG", "G11XQ"],
+    "NSW": ["2000", "2150"],
+    "VIC": ["3000", "3121"],
+}
+DEVICE_TYPES = ["mobile", "desktop", "tablet", "ctv"]
+DEVICE_OSES = ["iOS", "Android", "Windows", "macOS", "Roku", "Web"]
+DEVICES = DEVICE_OSES
+CARD_TIERS = ["Standard", "Gold", "Platinum", "WorldElite"]
+SPEND_TIERS = ["low", "medium", "high"]
 AGE_BUCKETS = ["18-24", "25-34", "35-44", "45-54", "55+"]
 
 
@@ -77,7 +102,14 @@ def campaign_is_eligible(user: UserProfile, campaign: Campaign) -> bool:
     user_segments = set(user.segments)
     return (
         _matches_dimension(user.geo, campaign.geo)
+        and _matches_optional_list(user.state, campaign.geo_states)
+        and _matches_optional_list(user.postal_code, campaign.geo_postal_codes)
         and _matches_dimension(user.device, campaign.device)
+        and _matches_dimension(user.device_type, campaign.device_types)
+        and _matches_dimension(user.card_tier, campaign.card_tiers)
+        and campaign.pacing_status == "active"
+        and campaign.spent_today_usd < campaign.daily_budget_usd
+        and user.frequency_history.get(campaign.campaign_id, 0) < campaign.frequency_cap
         and set(campaign.required_segments).issubset(user_segments)
         and (not campaign.any_of_segments or bool(user_segments.intersection(campaign.any_of_segments)))
         and not user_segments.intersection(campaign.none_of_segments)
@@ -99,3 +131,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _matches_dimension(user_value: str, campaign_values: list[str]) -> bool:
     return user_value in campaign_values or "*" in campaign_values
+
+
+def _matches_optional_list(user_value: str, campaign_values: list[str]) -> bool:
+    return not campaign_values or user_value in campaign_values or "*" in campaign_values

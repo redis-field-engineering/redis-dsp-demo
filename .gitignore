@@ -20,3 +20,4 @@ reports/generated/
 *.so
 dist/
 build/
+redis-requirements.pdf

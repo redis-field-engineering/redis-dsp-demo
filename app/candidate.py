@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 
 from app.models import Campaign, UserProfile
+from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS
 
 
 def build_candidate_lookup_keys(
@@ -22,14 +23,22 @@ def build_union_probe_candidate_lookup_keys(
     strong_signal_count: int = 2,
 ) -> list[list[str]]:
     strong_segments = user.segments[:strong_signal_count]
+    strict_base = [
+        f"idx:card_tier:{user.card_tier}",
+        f"idx:geo:{user.geo}",
+        f"idx:device_type:{user.device_type}",
+        f"idx:device:{user.device}",
+    ]
     keys: list[list[str]] = []
     segment_probe_patterns = [
-        [f"idx:geo:{user.geo}", f"idx:device:{user.device}"],
-        [f"idx:geo:*", f"idx:device:{user.device}"],
-        [f"idx:geo:{user.geo}", f"idx:device:*"],
-        [f"idx:geo:*", f"idx:device:*"],
-        [f"idx:geo:{user.geo}"],
-        [f"idx:device:{user.device}"],
+        strict_base,
+        strict_base[:-1],
+        [strict_base[0], strict_base[1], strict_base[3]],
+        [strict_base[0], strict_base[1]],
+        strict_base[1:],
+        [strict_base[1], strict_base[2]],
+        [strict_base[1], strict_base[3]],
+        [strict_base[1]],
         [],
     ]
     for base_keys in segment_probe_patterns:
@@ -37,10 +46,14 @@ def build_union_probe_candidate_lookup_keys(
             keys.append([*base_keys, segment_key] if base_keys else [segment_key])
     keys.extend(
         [
-            [f"idx:geo:{user.geo}", f"idx:device:{user.device}"],
-            [f"idx:geo:*", f"idx:device:{user.device}"],
-            [f"idx:geo:{user.geo}", f"idx:device:*"],
-            [f"idx:geo:*", f"idx:device:*"],
+            strict_base,
+            strict_base[:-1],
+            [strict_base[0], strict_base[1], strict_base[3]],
+            [strict_base[0], strict_base[1]],
+            strict_base[1:],
+            [strict_base[1], strict_base[2]],
+            [strict_base[1], strict_base[3]],
+            [strict_base[1]],
         ]
     )
     return _dedupe_key_groups(keys)
@@ -51,31 +64,41 @@ def build_naive_candidate_lookup_keys(
     strong_signal_count: int = 2,
 ) -> list[list[str]]:
     strong_segments = user.segments[:strong_signal_count]
+    strict_base = [
+        f"idx:card_tier:{user.card_tier}",
+        f"idx:geo:{user.geo}",
+        f"idx:device_type:{user.device_type}",
+        f"idx:device:{user.device}",
+    ]
     keys: list[list[str]] = []
     if strong_segments:
         segment_group = segment_keys(strong_segments)
         first_segment_key = segment_group[0]
         keys.extend(
             [
-                [f"idx:geo:{user.geo}", f"idx:device:{user.device}", *segment_group],
-                [f"idx:geo:*", f"idx:device:{user.device}", *segment_group],
-                [f"idx:geo:{user.geo}", f"idx:device:*", *segment_group],
-                [f"idx:geo:*", f"idx:device:*", *segment_group],
-                [f"idx:geo:{user.geo}", f"idx:device:{user.device}", first_segment_key],
-                [f"idx:geo:*", f"idx:device:{user.device}", first_segment_key],
-                [f"idx:geo:{user.geo}", f"idx:device:*", first_segment_key],
-                [f"idx:geo:*", f"idx:device:*", first_segment_key],
-                [f"idx:geo:{user.geo}", first_segment_key],
-                [f"idx:device:{user.device}", first_segment_key],
+                [*strict_base, *segment_group],
+                [*strict_base[:-1], *segment_group],
+                [strict_base[0], strict_base[1], strict_base[3], *segment_group],
+                [strict_base[0], strict_base[1], *segment_group],
+                [*strict_base, first_segment_key],
+                [*strict_base[:-1], first_segment_key],
+                [strict_base[0], strict_base[1], strict_base[3], first_segment_key],
+                [strict_base[0], strict_base[1], first_segment_key],
+                [strict_base[1], first_segment_key],
+                [strict_base[3], first_segment_key],
                 [first_segment_key],
             ]
         )
     keys.extend(
         [
-            [f"idx:geo:{user.geo}", f"idx:device:{user.device}"],
-            [f"idx:geo:*", f"idx:device:{user.device}"],
-            [f"idx:geo:{user.geo}", f"idx:device:*"],
-            [f"idx:geo:*", f"idx:device:*"],
+            strict_base,
+            strict_base[:-1],
+            [strict_base[0], strict_base[1], strict_base[3]],
+            [strict_base[0], strict_base[1]],
+            strict_base[1:],
+            [strict_base[1], strict_base[2]],
+            [strict_base[1], strict_base[3]],
+            [strict_base[1]],
         ]
     )
     return _dedupe_key_groups(keys)
@@ -127,7 +150,14 @@ def filter_campaigns_for_user(user: UserProfile, campaigns: Iterable[Campaign]) 
         campaign
         for campaign in campaigns
         if _matches_dimension(user.geo, campaign.geo)
+        and _matches_optional_list(user.state, campaign.geo_states)
+        and _matches_optional_list(user.postal_code, campaign.geo_postal_codes)
         and _matches_dimension(user.device, campaign.device)
+        and _matches_dimension(user.device_type, campaign.device_types)
+        and _matches_dimension(user.card_tier, campaign.card_tiers)
+        and campaign.pacing_status == "active"
+        and campaign.spent_today_usd < campaign.daily_budget_usd
+        and user.frequency_history.get(campaign.campaign_id, 0) < campaign.frequency_cap
         and set(campaign.required_segments).issubset(user_segments)
         and (not campaign.any_of_segments or bool(user_segments.intersection(campaign.any_of_segments)))
         and not user_segments.intersection(campaign.none_of_segments)
@@ -137,10 +167,14 @@ def filter_campaigns_for_user(user: UserProfile, campaigns: Iterable[Campaign]) 
 def build_indexes(campaigns: Sequence[Campaign]) -> dict[str, set[str]]:
     indexes: dict[str, set[str]] = {}
     for campaign in campaigns:
-        for geo in campaign.geo:
+        for geo in _expand_dimension(campaign.geo, GEOS):
             indexes.setdefault(f"idx:geo:{geo}", set()).add(campaign.campaign_id)
-        for device in campaign.device:
+        for card_tier in _expand_dimension(campaign.card_tiers, CARD_TIERS):
+            indexes.setdefault(f"idx:card_tier:{card_tier}", set()).add(campaign.campaign_id)
+        for device in _expand_dimension(campaign.device, DEVICE_OSES):
             indexes.setdefault(f"idx:device:{device}", set()).add(campaign.campaign_id)
+        for device_type in _expand_dimension(campaign.device_types, DEVICE_TYPES):
+            indexes.setdefault(f"idx:device_type:{device_type}", set()).add(campaign.campaign_id)
         for segment in [*campaign.required_segments, *campaign.any_of_segments]:
             indexes.setdefault(f"idx:segment:{segment}", set()).add(campaign.campaign_id)
     return indexes
@@ -167,6 +201,11 @@ def _matches_dimension(user_value: str, campaign_values: Iterable[str]) -> bool:
     return user_value in values or "*" in values
 
 
+def _matches_optional_list(user_value: str, campaign_values: Iterable[str]) -> bool:
+    values = set(campaign_values)
+    return not values or user_value in values or "*" in values
+
+
 def _merge_probe_results(probe_results: list[list[str]], *, max_candidates: int) -> list[str]:
     combined: list[str] = []
     seen: set[str] = set()
@@ -188,3 +227,10 @@ def _merge_probe_results(probe_results: list[list[str]], *, max_candidates: int)
         if not progressed:
             return combined
     return combined
+
+
+def _expand_dimension(values: Iterable[str], vocabulary: Sequence[str]) -> list[str]:
+    concrete_values = list(values)
+    if not concrete_values or "*" in concrete_values:
+        return list(vocabulary)
+    return concrete_values

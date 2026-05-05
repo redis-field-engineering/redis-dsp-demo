@@ -71,15 +71,21 @@ def test_filter_campaigns_supports_wildcard_geo_and_device() -> None:
     user = UserProfile(
         user_id="u3",
         geo="US",
+        state="CO",
+        postal_code="80202",
         device="iOS",
+        device_type="mobile",
         age_bucket="25-34",
         interests={"travel": 0.7},
         segments=["travel_high"],
+        card_tier="Gold",
     )
     wildcard = Campaign(
         campaign_id="wildcard",
         geo=["*"],
         device=["*"],
+        card_tiers=["*"],
+        device_types=["*"],
         required_segments=[],
         any_of_segments=["travel_high"],
         weights={"travel_high": 1.0},
@@ -87,6 +93,48 @@ def test_filter_campaigns_supports_wildcard_geo_and_device() -> None:
     )
     filtered = filter_campaigns_for_user(user, [wildcard])
     assert [campaign.campaign_id for campaign in filtered] == ["wildcard"]
+
+
+def test_filter_campaigns_applies_card_geo_device_pacing_and_frequency() -> None:
+    user = UserProfile(
+        user_id="u3b",
+        geo="US",
+        state="NY",
+        postal_code="10001",
+        device="iOS",
+        device_type="mobile",
+        card_tier="Platinum",
+        age_bucket="25-34",
+        interests={"travel": 0.7},
+        segments=["travel_high"],
+        frequency_history={"capped": 2},
+    )
+    matching = Campaign(
+        campaign_id="match",
+        geo=["US"],
+        geo_states=["NY"],
+        geo_postal_codes=["10001"],
+        device=["iOS"],
+        device_types=["mobile"],
+        card_tiers=["Platinum", "WorldElite"],
+        pacing_status="active",
+        daily_budget_usd=100.0,
+        spent_today_usd=55.0,
+        frequency_cap=3,
+        required_segments=[],
+        weights={"travel": 1.0},
+        bid=1.0,
+    )
+    capped = matching.model_copy(update={"campaign_id": "capped", "frequency_cap": 2})
+    paused = matching.model_copy(update={"campaign_id": "paused", "pacing_status": "paused"})
+    wrong_state = matching.model_copy(update={"campaign_id": "wrong_state", "geo_states": ["CA"]})
+    wrong_device_type = matching.model_copy(update={"campaign_id": "wrong_device_type", "device_types": ["desktop"]})
+    wrong_card = matching.model_copy(update={"campaign_id": "wrong_card", "card_tiers": ["Gold"]})
+    filtered = filter_campaigns_for_user(
+        user,
+        [matching, capped, paused, wrong_state, wrong_device_type, wrong_card],
+    )
+    assert [campaign.campaign_id for campaign in filtered] == ["match"]
 
 
 def test_union_probe_recovers_second_segment_but_naive_drops_it() -> None:
