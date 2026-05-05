@@ -21,3 +21,4 @@ reports/generated/
 dist/
 build/
 redis-requirements.pdf
+hybrid_prompt.md

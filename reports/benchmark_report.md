@@ -1,88 +1,123 @@
 # Benchmark Report
 
-## Scope
+## Retrieval Overview
 
-This report reflects the rebuilt MAID-style synthetic demo path now running on the local Docker stack:
+Decision-path latency is measured as `identity_resolution_ms + profile_fetch_ms + candidate_generation_ms + campaign_fetch_ms + filtering_ms + rerank_ms`.
+Every mode in this benchmark is invoked with an `identity_token`, so identity resolution is included in each row.
+The metric excludes HTTP/framework overhead but includes profile fetch and reranking only when that mode actually performs them.
 
-- identity token resolution
-- MAID profile lookup
-- set-based candidate generation
-- exact ad filtering for card tier, geo hierarchy, device hierarchy, pacing, and frequency
-- in-memory reranking
+| Mode | Retrieval Shape | Avg SINTER Ops | Avg Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `maid_bruteforce_sinter` | legacy 26-probe SINTER plan | 26 | 28 | 28.701 | 124.332 |
+| `maid_tightened_sinter` | tightened pipelined SINTER plan | 3 | 3 | 5.102 | 31.929 |
+| `precomputed_segment` | direct aud:{maid} + maid_hot | 0 | 3 | 4.566 | 23.535 |
+| `hybrid_precompute_plus_realtime` | direct aud:{maid} + maid_hot + live gating | 0 | 3 | 4.133 | 43.152 |
+| `hybrid_bitmap_gating` | direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check | 0 | 2 | 2.9 | 14.899 |
 
-The benchmark uses the current full synthetic dataset:
+## Method Definitions
 
-- `4000` MAIDs
-- `2500` campaigns
-- `120000` synthetic interactions
+- `maid_bruteforce_sinter`
+  Uses the original MAID retrieval planner. After identity resolution and full MAID fetch, it runs 26 sequential `SINTER` probes that aggressively explore combinations of card tier, geo, device, and strong user segments before fetching campaign state and filtering live.
+- `maid_tightened_sinter`
+  Uses the reduced MAID retrieval planner. After identity resolution and full MAID fetch, it issues a compact pipelined `SINTER` plan with only three probes: one per strong segment plus a strict base fallback.
+- `precomputed_segment`
+  Resolves the identity token, fetches a compact `maid_hot:{maid_id}` scoring profile, reads the precomputed `aud:{maid_id}` candidate list, then fetches campaign/state data plus a single per-MAID `fcap:{maid_id}` hash and reranks. It relies on batch-computed static targeting and only applies minimal live gating online.
+- `hybrid_precompute_plus_realtime`
+  Uses the same `maid_hot:{maid_id}` and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.
+- `hybrid_bitmap_gating`
+  Uses `maid_hot:{maid_id}` and `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.
+- `full_realtime`
+  Resolves the identity token, fetches the full MAID profile, materializes the entire campaign universe, filters everything live, and reranks the surviving set. It is the correctness baseline, not the preferred low-latency design.
 
-## Offline Quality
+## Synthetic Offline Mode Comparison
+- users evaluated: 250
 
-Source: [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
+### Full Real-Time Mode
+- NDCG@K: 0.9813
+- Precision@K: 0.9984
+- Recall@K: 0.2668
+- F1@K: 0.4093
+- Candidate Recall: 1.0
+- Eligible Recall: 1.0
+- Avg Candidates: 2500.0
+- Avg Eligible: 24.468
 
-- `NDCG@K`: `0.978`
-- `Precision@K`: `0.9984`
-- `Recall@K`: `0.2668`
-- `F1@K`: `0.4093`
-- `Candidate generation recall`: `0.9372`
+### Precomputed Segment Mode
+- NDCG@K: 0.9813
+- Precision@K: 0.9984
+- Recall@K: 0.2668
+- F1@K: 0.4093
+- Candidate Recall: 1.0
+- Eligible Recall: 1.0
+- Eligible Set Jaccard vs Full: 1.0
+- Top Result Jaccard vs Full: 1.0
+- Avg Candidates: 30.168
+- Avg Eligible: 24.468
 
-Interpretation:
+### Hybrid Precompute + Realtime Mode
+- NDCG@K: 0.9813
+- Precision@K: 0.9984
+- Recall@K: 0.2668
+- F1@K: 0.4093
+- Candidate Recall: 1.0
+- Eligible Recall: 1.0
+- Eligible Set Jaccard vs Full: 1.0
+- Top Result Jaccard vs Full: 1.0
+- Avg Candidates: 30.168
+- Avg Eligible: 24.468
 
-- the exact-filter MAID path still produces very high top-of-list precision
-- candidate recall is high again after reducing the probe plan and adding state-aware retrieval
-- the remaining recall gap is mostly top-K truncation, not candidate-domain loss
+## Serial Live Load By Mode
+### full_realtime
+- handler avg / p95 / p99 ms: 40.029 / 79.84 / 140.11
+- identity resolution avg / p95 / p99 ms: 2.346 / 3.355 / 56.064
+- profile fetch avg / p95 / p99 ms: 1.387 / 3.508 / 16.624
+- candidate generation avg / p95 / p99 ms: 0.094 / 0.217 / 0.27
+- avg candidates / eligible: 2500 / 24.579
+- avg redis round trips: 4
 
-## Serial Live Load Test
+### maid_bruteforce_sinter
+- decision-path p50 / p99 ms: 28.701 / 124.332
+- validated candidate p50 / p99 ms: 25.536 / 120.943
+- candidate generation avg / p95 / p99 ms: 32.834 / 74.259 / 105.826
+- avg SINTER ops / mode redis round trips: 26 / 28
+- avg candidates / eligible: 50 / 2.893
 
-Source: [reports/generated/loadtest.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/loadtest.json)
+### maid_tightened_sinter
+- decision-path p50 / p99 ms: 5.102 / 31.929
+- validated candidate p50 / p99 ms: 3.297 / 21.52
+- candidate generation avg / p95 / p99 ms: 1.305 / 3.236 / 6.405
+- avg SINTER ops / mode redis round trips: 3 / 3
+- avg candidates / eligible: 50 / 12.57
 
-Method:
+### precomputed_segment
+- handler avg / p95 / p99 ms: 5.643 / 12.778 / 23.662
+- identity resolution avg / p95 / p99 ms: 1.151 / 3.014 / 5.226
+- profile fetch avg / p95 / p99 ms: 1.011 / 3.042 / 3.99
+- candidate generation avg / p95 / p99 ms: 0.819 / 2.025 / 3.714
+- decision-path p50 / p99 ms: 4.566 / 23.535
+- validated candidate p50 / p99 ms: 2.629 / 14.343
+- avg SINTER ops / mode redis round trips: 0 / 3
+- avg candidates / eligible: 30.083 / 24.529
+- avg redis round trips: 5
 
-- serial request mode
-- `15` target RPS
-- `15` measured seconds
-- `2` warmup seconds
-- live HTTP calls to `POST /rank`
-- request body uses `identity_token`
+### hybrid_precompute_plus_realtime
+- handler avg / p95 / p99 ms: 6.022 / 15.956 / 43.229
+- identity resolution avg / p95 / p99 ms: 1.125 / 2.717 / 5.98
+- profile fetch avg / p95 / p99 ms: 0.86 / 2.573 / 3.03
+- candidate generation avg / p95 / p99 ms: 0.87 / 2.552 / 6.509
+- decision-path p50 / p99 ms: 4.133 / 43.152
+- validated candidate p50 / p99 ms: 2.294 / 18.838
+- avg SINTER ops / mode redis round trips: 0 / 3
+- avg candidates / eligible: 30.083 / 24.529
+- avg redis round trips: 5
 
-Results:
-
-- requests: `226`
-- success rate: `1.0`
-- throughput: `15.06 RPS`
-- client latency: `21.789 ms` avg, `59.984 ms` p95, `211.566 ms` p99
-- server latency: `12.201 ms` avg, `40.602 ms` p95, `92.058 ms` p99
-- handler latency: `7.903 ms` avg, `24.846 ms` p95, `52.034 ms` p99
-
-## Phase Timing Breakdown
-
-Sampled from live `/rank` responses over `150` serial requests:
-
-- identity + MAID fetch: `2.241 ms` avg, `5.997 ms` p95, `12.307 ms` p99
-- candidate generation: `2.327 ms` avg, `5.955 ms` p95, `13.021 ms` p99
-- campaign materialization: `0.393 ms` avg, `0.855 ms` p95, `7.697 ms` p99
-- reranking: `0.263 ms` avg, `0.805 ms` p95, `2.227 ms` p99
-- total handler time: `6.358 ms` avg, `20.229 ms` p95, `41.678 ms` p99
-- Redis round trips: `3` avg, `3` p95, `3` p99
-
-## Conclusion
-
-What works well:
-
-- identity-token resolution is functional and fast enough not to dominate the request
-- candidate generation is now low-single-digit milliseconds on average
-- campaign materialization is effectively free because campaign metadata is cached in memory
-- reranking is negligible
-- the demo now looks much closer to the intended MAID/ad-cache retrieval problem
-
-What is limiting the current system:
-
-- the handler average is now under `10 ms`, but the tail is still above that target
-- remaining p95/p99 latency is mostly request-level variability, not candidate-generation cost
-- the end-to-end HTTP p95/p99 still includes framework and container overhead on top of the handler
-
-The next optimization work should focus on:
-
-1. reducing MAID fetch and deserialization cost
-2. deciding whether frequency state should move to a separate hot-path structure
-3. evaluating a server-side Redis Function to collapse identity resolution and candidate retrieval into one execution
+### hybrid_bitmap_gating
+- handler avg / p95 / p99 ms: 3.66 / 10.458 / 14.939
+- identity resolution avg / p95 / p99 ms: 1.09 / 2.073 / 4.132
+- profile fetch avg / p95 / p99 ms: 0.795 / 2.281 / 3.801
+- candidate generation avg / p95 / p99 ms: 0.758 / 1.953 / 3.252
+- decision-path p50 / p99 ms: 2.9 / 14.899
+- validated candidate p50 / p99 ms: 1.066 / 6.248
+- avg SINTER ops / mode redis round trips: 0 / 2
+- avg candidates / eligible: 26.388 / 24.57
+- avg redis round trips: 4

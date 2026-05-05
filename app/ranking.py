@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from math import exp
 
-from app.models import Campaign, ScoredCandidate, UserProfile
+from app.models import Campaign, ScoredCandidate, ScoringProfile, UserProfile
 
 
-def score_campaign(user: UserProfile, campaign: Campaign) -> ScoredCandidate:
+def score_campaign(user: UserProfile | ScoringProfile, campaign: Campaign) -> ScoredCandidate:
     interest_score = sum(
         user.interests.get(feature, 0.0) * weight for feature, weight in campaign.weights.items()
     )
@@ -24,7 +24,7 @@ def score_campaign(user: UserProfile, campaign: Campaign) -> ScoredCandidate:
     )
 
 
-def rerank_campaigns(user: UserProfile, campaigns: list[Campaign], top_k: int) -> list[ScoredCandidate]:
+def rerank_campaigns(user: UserProfile | ScoringProfile, campaigns: list[Campaign], top_k: int) -> list[ScoredCandidate]:
     ranked = [score_campaign(user, campaign) for campaign in campaigns]
     ranked.sort(key=lambda candidate: candidate.score, reverse=True)
     return ranked[:top_k]

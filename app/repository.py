@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import json
 
 from redis import Redis
 
 from app.candidate import build_candidate_lookup_keys, _merge_probe_results
-from app.models import Campaign, UserProfile
+from app.models import Campaign, ScoringProfile, UserProfile
 from data.load_redis import load_dataset_into_redis
 from data.synthetic import ensure_synthetic_dataset
 
@@ -15,6 +16,27 @@ class RedisRepository:
     def __init__(self, redis_url: str):
         self.client = Redis.from_url(redis_url, decode_responses=True)
         self.campaign_cache: dict[str, Campaign] = {}
+        self._bitmap_gate_script = self.client.register_script(
+            """
+            local payload = redis.call('GET', KEYS[1])
+            if not payload then
+                return {}
+            end
+            local candidate_ids = cjson.decode(payload)
+            local max_results = tonumber(ARGV[1])
+            local gated = {}
+            for _, campaign_id in ipairs(candidate_ids) do
+                local bit_index = tonumber(string.sub(campaign_id, 2))
+                if redis.call('GETBIT', KEYS[2], bit_index) == 1 then
+                    table.insert(gated, campaign_id)
+                    if #gated >= max_results then
+                        break
+                    end
+                end
+            end
+            return gated
+            """
+        )
 
     def ping(self) -> bool:
         return bool(self.client.ping())
@@ -45,6 +67,29 @@ class RedisRepository:
             return None, 1
         return UserProfile.from_redis_hash(payload), 1
 
+    def fetch_scoring_profile(self, user_id: str) -> tuple[ScoringProfile | None, int]:
+        payload = self.client.hmget(
+            f"maid_hot:{user_id}",
+            "user_id",
+            "interests_json",
+            "impression_count",
+        )
+        if payload[0] is not None:
+            return (
+                ScoringProfile.from_redis_hash(
+                    {
+                        "user_id": payload[0],
+                        "interests_json": payload[1] or "{}",
+                        "impression_count": payload[2] or "0",
+                    }
+                ),
+                1,
+            )
+        user, round_trips = self.fetch_user(user_id)
+        if user is None:
+            return None, round_trips
+        return ScoringProfile.from_user_profile(user), round_trips
+
     def resolve_identity(self, identity_token: str) -> tuple[str | None, int]:
         maid_id = self.client.get(f"identity:{identity_token}")
         return (str(maid_id) if maid_id else None), 1
@@ -60,6 +105,67 @@ class RedisRepository:
         payloads = pipeline.execute()
         campaigns = [Campaign.from_redis_hash(payload) for payload in payloads if payload]
         return campaigns, 1
+
+    def all_campaign_ids(self) -> list[str]:
+        if self.campaign_cache:
+            return sorted(self.campaign_cache)
+        return sorted(
+            key.removeprefix("campaign:")
+            for key in self.client.scan_iter(match="campaign:*", count=1000)
+        )
+
+    def fetch_user_candidates(self, user_id: str, *, limit: int) -> tuple[list[str], int]:
+        payload = self.client.get(f"aud:{user_id}")
+        if not payload:
+            return [], 1
+        candidate_ids = [str(campaign_id) for campaign_id in json.loads(payload)]
+        return candidate_ids[:limit], 1
+
+    def fetch_bitmap_gated_user_candidates(self, user_id: str, *, limit: int) -> tuple[list[str], int]:
+        gated_ids = self._bitmap_gate_script(
+            keys=[
+                f"aud:{user_id}",
+                "bm:servable",
+            ],
+            args=[limit],
+        )
+        return [str(campaign_id) for campaign_id in gated_ids], 1
+
+    def fetch_campaign_states(self, campaign_ids: Sequence[str]) -> tuple[dict[str, dict[str, str]], int]:
+        if not campaign_ids:
+            return {}, 0
+        pipeline = self.client.pipeline(transaction=False)
+        for campaign_id in campaign_ids:
+            pipeline.hmget(
+                f"campaign_state:{campaign_id}",
+                "pacing_status",
+                "daily_budget_usd",
+                "spent_today_usd",
+                "frequency_cap",
+            )
+        payloads = pipeline.execute()
+        states: dict[str, dict[str, str]] = {}
+        for campaign_id, payload in zip(campaign_ids, payloads, strict=False):
+            pacing_status, daily_budget_usd, spent_today_usd, frequency_cap = payload
+            if pacing_status is None:
+                continue
+            states[campaign_id] = {
+                "pacing_status": str(pacing_status),
+                "daily_budget_usd": str(daily_budget_usd or "0"),
+                "spent_today_usd": str(spent_today_usd or "0"),
+                "frequency_cap": str(frequency_cap or "0"),
+            }
+        return states, 1
+
+    def fetch_frequency_caps(self, user_id: str, campaign_ids: Sequence[str]) -> tuple[dict[str, int], int]:
+        if not campaign_ids:
+            return {}, 0
+        payloads = self.client.hmget(f"fcap:{user_id}", list(campaign_ids))
+        return {
+            campaign_id: int(payload)
+            for campaign_id, payload in zip(campaign_ids, payloads, strict=False)
+            if payload is not None
+        }, 1
 
     def _load_campaign_cache(self) -> None:
         campaign_ids = sorted(
@@ -87,26 +193,33 @@ class RedisRepository:
         max_candidates: int,
         strong_signal_count: int,
         strategy: str = "union_probe",
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int, int]:
+        key_groups = build_candidate_lookup_keys(
+            user,
+            strong_signal_count=strong_signal_count,
+            strategy=strategy,
+        )
+        sinter_ops = len(key_groups)
+
+        if strategy == "legacy_union_probe":
+            probe_results: list[list[str]] = []
+            round_trips = 0
+            for key_group in key_groups:
+                result = self.client.sinter(key_group)
+                round_trips += 1
+                if result:
+                    probe_results.append(sorted(result))
+            return _merge_probe_results(probe_results, max_candidates=max_candidates), round_trips, sinter_ops
+
         if strategy == "union_probe":
-            key_groups = build_candidate_lookup_keys(
-                user,
-                strong_signal_count=strong_signal_count,
-                strategy=strategy,
-            )
             pipeline = self.client.pipeline(transaction=False)
             for key_group in key_groups:
                 pipeline.sinter(key_group)
             payloads = pipeline.execute()
             probe_results = [sorted(result) for result in payloads if result]
             round_trips = 1 if key_groups else 0
-            return _merge_probe_results(probe_results, max_candidates=max_candidates), round_trips
+            return _merge_probe_results(probe_results, max_candidates=max_candidates), round_trips, sinter_ops
 
-        key_groups = build_candidate_lookup_keys(
-            user,
-            strong_signal_count=strong_signal_count,
-            strategy=strategy,
-        )
         pipeline = self.client.pipeline(transaction=False)
         for key_group in key_groups:
             pipeline.sinter(key_group)
@@ -120,5 +233,5 @@ class RedisRepository:
                 seen.add(campaign_id)
                 combined.append(campaign_id)
                 if len(combined) >= max_candidates:
-                    return combined, 1 if key_groups else 0
-        return combined, 1 if key_groups else 0
+                    return combined, 1 if key_groups else 0, sinter_ops
+        return combined, 1 if key_groups else 0, sinter_ops

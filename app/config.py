@@ -11,9 +11,11 @@ class Settings(BaseSettings):
     app_name: str = "redis-dsp-demo"
     redis_url: str = "redis://localhost:6379/0"
     dataset_dir: Path = Path("data/generated/synthetic")
+    default_mode: str = "hybrid_precompute_plus_realtime"
     top_k: int = 5
     max_candidates: int = 50
     strong_signal_count: int = 2
+    precomputed_candidate_limit: int = 150
     cache_campaigns_in_memory: bool = True
     auto_bootstrap_data: bool = False
     synthetic_users: int = Field(default=4000, ge=100)

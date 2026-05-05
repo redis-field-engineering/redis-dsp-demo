@@ -8,7 +8,14 @@ from statistics import mean
 import pandas as pd
 
 from app.candidate import build_indexes, filter_campaigns_for_user, generate_candidates_in_memory
-from app.models import Campaign, UserProfile
+from app.models import (
+    FULL_REALTIME_MODE,
+    HYBRID_MODE,
+    HYBRID_BITMAP_MODE,
+    PRECOMPUTED_SEGMENT_MODE,
+    Campaign,
+    UserProfile,
+)
 from app.ranking import rerank_campaigns
 from data.common import click_label, click_probability, read_jsonl
 from data.fairjob_adapter import export_fairjob_dataset
@@ -103,6 +110,107 @@ def evaluate_synthetic(
         "recall_at_k": round(mean(recalls), 4) if recalls else 0.0,
         "f1_at_k": round(mean(f1s), 4) if f1s else 0.0,
         "candidate_generation_recall": round(mean(candidate_recalls), 4) if candidate_recalls else 0.0,
+    }
+
+
+def evaluate_synthetic_modes(
+    dataset_dir: Path,
+    *,
+    top_k: int = 5,
+    sample_users: int = 250,
+    precomputed_limit: int = 150,
+) -> dict[str, object]:
+    users = [UserProfile.model_validate(item) for item in read_jsonl(dataset_dir / "users.jsonl")]
+    campaigns = [Campaign.model_validate(item) for item in read_jsonl(dataset_dir / "campaigns.jsonl")]
+    campaign_by_id = {campaign.campaign_id: campaign for campaign in campaigns}
+    user_candidates = _load_user_candidates(dataset_dir)
+    mode_names = [FULL_REALTIME_MODE, PRECOMPUTED_SEGMENT_MODE, HYBRID_MODE, HYBRID_BITMAP_MODE]
+    metric_buckets = {
+        mode_name: {
+            "ndcg_at_k": [],
+            "precision_at_k": [],
+            "recall_at_k": [],
+            "f1_at_k": [],
+            "candidate_generation_recall": [],
+            "eligible_recall": [],
+            "candidate_count": [],
+            "eligible_count": [],
+            "top_result_jaccard_vs_full_realtime": [],
+            "eligible_set_jaccard_vs_full_realtime": [],
+        }
+        for mode_name in mode_names
+    }
+
+    evaluated = 0
+    for user in users[:sample_users]:
+        full_eligible = filter_campaigns_for_user(user, campaigns)
+        if not full_eligible:
+            continue
+        relevant_ids = {
+            campaign.campaign_id for campaign in full_eligible if click_label(user, campaign) == 1
+        }
+        if not relevant_ids:
+            continue
+        evaluated += 1
+        full_ranked = rerank_campaigns(user, full_eligible, top_k=top_k)
+        full_eligible_ids = {campaign.campaign_id for campaign in full_eligible}
+        full_top_ids = [item.campaign_id for item in full_ranked]
+        ideal_relevances = [click_probability(user, campaign) for campaign in full_eligible]
+
+        mode_outputs: dict[str, tuple[list[str], list[Campaign], list[str]]] = {}
+        for mode_name in mode_names:
+            candidate_ids, eligible_campaigns = _execute_synthetic_mode(
+                user=user,
+                campaigns=campaigns,
+                campaign_by_id=campaign_by_id,
+                user_candidates=user_candidates,
+                mode=mode_name,
+                precomputed_limit=precomputed_limit,
+            )
+            ranked = rerank_campaigns(user, eligible_campaigns, top_k=top_k)
+            ranked_ids = [item.campaign_id for item in ranked]
+            labels = [int(campaign_id in relevant_ids) for campaign_id in ranked_ids]
+            predicted_relevances = [
+                click_probability(user, campaign_by_id[campaign_id])
+                for campaign_id in ranked_ids
+                if campaign_id in campaign_by_id
+            ]
+            precision = precision_at_k(labels, top_k)
+            recall = recall_at_k(labels, len(relevant_ids), top_k)
+            eligible_ids = {campaign.campaign_id for campaign in eligible_campaigns}
+            metric_buckets[mode_name]["ndcg_at_k"].append(ndcg_at_k(predicted_relevances, ideal_relevances, top_k))
+            metric_buckets[mode_name]["precision_at_k"].append(precision)
+            metric_buckets[mode_name]["recall_at_k"].append(recall)
+            metric_buckets[mode_name]["f1_at_k"].append(f1_at_k(precision, recall))
+            metric_buckets[mode_name]["candidate_generation_recall"].append(
+                len(set(candidate_ids) & relevant_ids) / len(relevant_ids)
+            )
+            metric_buckets[mode_name]["eligible_recall"].append(
+                len(eligible_ids & relevant_ids) / len(relevant_ids)
+            )
+            metric_buckets[mode_name]["candidate_count"].append(float(len(candidate_ids)))
+            metric_buckets[mode_name]["eligible_count"].append(float(len(eligible_ids)))
+            mode_outputs[mode_name] = (candidate_ids, eligible_campaigns, ranked_ids)
+
+        for mode_name in mode_names:
+            _, eligible_campaigns, ranked_ids = mode_outputs[mode_name]
+            eligible_ids = {campaign.campaign_id for campaign in eligible_campaigns}
+            metric_buckets[mode_name]["top_result_jaccard_vs_full_realtime"].append(
+                _jaccard(set(ranked_ids), set(full_top_ids))
+            )
+            metric_buckets[mode_name]["eligible_set_jaccard_vs_full_realtime"].append(
+                _jaccard(eligible_ids, full_eligible_ids)
+            )
+
+    return {
+        "users_evaluated": evaluated,
+        "modes": {
+            mode_name: {
+                metric: round(mean(values), 4) if values else 0.0
+                for metric, values in metrics.items()
+            }
+            for mode_name, metrics in metric_buckets.items()
+        },
     }
 
 
@@ -234,6 +342,61 @@ def evaluate_interaction_dataset(
     }
 
 
+def _execute_synthetic_mode(
+    *,
+    user: UserProfile,
+    campaigns: list[Campaign],
+    campaign_by_id: dict[str, Campaign],
+    user_candidates: dict[str, list[str]],
+    mode: str,
+    precomputed_limit: int,
+) -> tuple[list[str], list[Campaign]]:
+    if mode == FULL_REALTIME_MODE:
+        return [campaign.campaign_id for campaign in campaigns], filter_campaigns_for_user(user, campaigns)
+
+    candidate_ids = user_candidates.get(user.user_id, [])[:precomputed_limit]
+    candidate_campaigns = [
+        campaign_by_id[campaign_id]
+        for campaign_id in candidate_ids
+        if campaign_id in campaign_by_id
+    ]
+    if mode in {PRECOMPUTED_SEGMENT_MODE, HYBRID_BITMAP_MODE}:
+        return candidate_ids, _minimal_live_filter(user, candidate_campaigns)
+    return candidate_ids, filter_campaigns_for_user(user, candidate_campaigns)
+
+
+def _minimal_live_filter(user: UserProfile, campaigns: list[Campaign]) -> list[Campaign]:
+    eligible: list[Campaign] = []
+    for campaign in campaigns:
+        if campaign.pacing_status != "active":
+            continue
+        if campaign.spent_today_usd >= campaign.daily_budget_usd:
+            continue
+        if user.frequency_history.get(campaign.campaign_id, 0) >= campaign.frequency_cap:
+            continue
+        eligible.append(campaign)
+    return eligible
+
+
+def _load_user_candidates(dataset_dir: Path) -> dict[str, list[str]]:
+    path = dataset_dir / "user_candidates.jsonl"
+    if not path.exists():
+        return {}
+    return {
+        str(row["user_id"]): [str(campaign_id) for campaign_id in row["candidate_ids"]]
+        for row in read_jsonl(path)
+    }
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 1.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
 def _log2(value: int) -> float:
     from math import log2
 
@@ -251,6 +414,7 @@ def main() -> None:
 
     results = {
         "synthetic": evaluate_synthetic(args.dataset_dir, top_k=args.top_k),
+        "synthetic_modes": evaluate_synthetic_modes(args.dataset_dir, top_k=args.top_k),
         "mind": evaluate_mind_translation(args.mind_output_dir, top_k=args.top_k),
         "fairjob": evaluate_fairjob_translation(args.fairjob_output_dir, top_k=args.top_k),
     }
