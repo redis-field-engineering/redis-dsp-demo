@@ -25,13 +25,13 @@ def percentile(values: list[float], pct: float) -> float:
     return values[lower] * (1 - weight) + values[upper] * weight
 
 
-def build_user_sampler(user_ids: list[str], hot_fraction: float = 0.2) -> callable:
+def build_user_sampler(identifiers: list[dict[str, str]], hot_fraction: float = 0.2) -> callable:
     random = Random(23)
-    hot_cutoff = max(1, int(len(user_ids) * hot_fraction))
-    hot_users = user_ids[:hot_cutoff]
-    cold_users = user_ids[hot_cutoff:]
+    hot_cutoff = max(1, int(len(identifiers) * hot_fraction))
+    hot_users = identifiers[:hot_cutoff]
+    cold_users = identifiers[hot_cutoff:]
 
-    def sample() -> str:
+    def sample() -> dict[str, str]:
         if cold_users and random.random() < 0.3:
             return random.choice(cold_users)
         return random.choice(hot_users)
@@ -42,7 +42,7 @@ def build_user_sampler(user_ids: list[str], hot_fraction: float = 0.2) -> callab
 async def run_load_test(
     *,
     base_url: str,
-    user_ids: list[str],
+    identifiers: list[dict[str, str]],
     duration_seconds: int,
     target_rps: int,
     concurrency: int,
@@ -55,7 +55,7 @@ async def run_load_test(
         limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
     )
     semaphore = asyncio.Semaphore(concurrency)
-    sample_user = build_user_sampler(user_ids)
+    sample_user = build_user_sampler(identifiers)
     latencies: list[float] = []
     server_process_latencies: list[float] = []
     handler_latencies: list[float] = []
@@ -71,10 +71,10 @@ async def run_load_test(
     async def one_request(measure: bool) -> None:
         nonlocal measured_successes, measured_failures, total_successes, total_failures
         async with semaphore:
-            user_id = sample_user()
+            request_body = sample_user()
             begin = time.perf_counter()
             try:
-                response = await client.post("/rank", json={"user_id": user_id})
+                response = await client.post("/rank", json=request_body)
                 latency_ms = (time.perf_counter() - begin) * 1000
                 if measure:
                     latencies.append(latency_ms)
@@ -194,11 +194,20 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("reports/generated/loadtest.json"))
     args = parser.parse_args()
 
-    users = read_jsonl(args.dataset_dir / "users.jsonl")
+    user_path = args.dataset_dir / "maids.jsonl"
+    if not user_path.exists():
+        user_path = args.dataset_dir / "users.jsonl"
+    users = read_jsonl(user_path)
+    identifiers = [
+        {"identity_token": user["identity_tokens"][0]}
+        if user.get("identity_tokens")
+        else {"user_id": user["user_id"]}
+        for user in users
+    ]
     results = asyncio.run(
         run_load_test(
             base_url=args.base_url,
-            user_ids=[user["user_id"] for user in users],
+            identifiers=identifiers,
             duration_seconds=args.duration_seconds,
             target_rps=args.target_rps,
             concurrency=args.concurrency,

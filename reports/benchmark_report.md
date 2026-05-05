@@ -1,55 +1,88 @@
 # Benchmark Report
 
-## Synthetic Offline Metrics
-These metrics come from the repo-generated synthetic dataset and measure the full candidate-generation plus reranking pipeline offline.
-- NDCG@K: 0.9946
-- Precision@K: 0.9001
-- Recall@K: 0.9606
-- F1@K: 0.9113
-- Candidate Recall: 1.0
+## Scope
 
-## MIND Translation Metrics
-These metrics come from the translated Hugging Face `Recommenders/MIND` sample and provide a more realistic, weaker baseline than the synthetic generator.
-- NDCG@K: 0.2618
-- Precision@K: 0.1138
-- Recall@K: 0.3631
-- F1@K: 0.1656
+This report reflects the rebuilt MAID-style synthetic demo path now running on the local Docker stack:
 
-## FairJob Translation Metrics
-These metrics come from the derived `criteo/FairJob` path. The adapter infers targeting buckets from historical click lift, then evaluates reranking against observed impression slates. The conservative numbers below use `displayrandom = 1` rows to reduce position bias.
-- NDCG@K: 0.0938
-- Precision@K: 0.0938
-- Recall@K: 0.0938
-- F1@K: 0.0938
-- Candidate Recall: 0.125
-- Displayed Candidate Coverage: 0.1377
+- identity token resolution
+- MAID profile lookup
+- set-based candidate generation
+- exact ad filtering for card tier, geo hierarchy, device hierarchy, pacing, and frequency
+- in-memory reranking
 
-## Serial Load Test
-This is the current single-shard serial measurement against the running local container app. It is the most representative non-concurrent latency snapshot for the prototype.
-- Requests: 1001
-- Success Rate: 1.0
-- Throughput RPS: 100.05
-- Client Avg Latency ms: 4.502
-- Client p95 Latency ms: 6.951
-- Client p99 Latency ms: 14.295
-- Server Avg Latency ms: 2.465
-- Server p95 Latency ms: 3.621
-- Server p99 Latency ms: 7.732
-- Handler Avg Latency ms: 1.755
-- Handler p95 Latency ms: 2.425
-- Handler p99 Latency ms: 5.875
+The benchmark uses the current full synthetic dataset:
 
-## FairJob App Serial Load Test
-This is the same serial benchmark shape run against a local app instance backed by the FairJob-derived dataset on `http://127.0.0.1:8011`.
-- Requests: 1001
-- Success Rate: 1.0
-- Throughput RPS: 100.03
-- Client Avg Latency ms: 6.328
-- Client p95 Latency ms: 13.856
-- Client p99 Latency ms: 25.516
-- Server Avg Latency ms: 4.741
-- Server p95 Latency ms: 11.015
-- Server p99 Latency ms: 22.413
-- Handler Avg Latency ms: 3.919
-- Handler p95 Latency ms: 8.758
-- Handler p99 Latency ms: 21.193
+- `4000` MAIDs
+- `2500` campaigns
+- `120000` synthetic interactions
+
+## Offline Quality
+
+Source: [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
+
+- `NDCG@K`: `0.978`
+- `Precision@K`: `0.9984`
+- `Recall@K`: `0.2668`
+- `F1@K`: `0.4093`
+- `Candidate generation recall`: `0.9372`
+
+Interpretation:
+
+- the exact-filter MAID path still produces very high top-of-list precision
+- candidate recall is high again after reducing the probe plan and adding state-aware retrieval
+- the remaining recall gap is mostly top-K truncation, not candidate-domain loss
+
+## Serial Live Load Test
+
+Source: [reports/generated/loadtest.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/loadtest.json)
+
+Method:
+
+- serial request mode
+- `15` target RPS
+- `15` measured seconds
+- `2` warmup seconds
+- live HTTP calls to `POST /rank`
+- request body uses `identity_token`
+
+Results:
+
+- requests: `226`
+- success rate: `1.0`
+- throughput: `15.06 RPS`
+- client latency: `21.789 ms` avg, `59.984 ms` p95, `211.566 ms` p99
+- server latency: `12.201 ms` avg, `40.602 ms` p95, `92.058 ms` p99
+- handler latency: `7.903 ms` avg, `24.846 ms` p95, `52.034 ms` p99
+
+## Phase Timing Breakdown
+
+Sampled from live `/rank` responses over `150` serial requests:
+
+- identity + MAID fetch: `2.241 ms` avg, `5.997 ms` p95, `12.307 ms` p99
+- candidate generation: `2.327 ms` avg, `5.955 ms` p95, `13.021 ms` p99
+- campaign materialization: `0.393 ms` avg, `0.855 ms` p95, `7.697 ms` p99
+- reranking: `0.263 ms` avg, `0.805 ms` p95, `2.227 ms` p99
+- total handler time: `6.358 ms` avg, `20.229 ms` p95, `41.678 ms` p99
+- Redis round trips: `3` avg, `3` p95, `3` p99
+
+## Conclusion
+
+What works well:
+
+- identity-token resolution is functional and fast enough not to dominate the request
+- candidate generation is now low-single-digit milliseconds on average
+- campaign materialization is effectively free because campaign metadata is cached in memory
+- reranking is negligible
+- the demo now looks much closer to the intended MAID/ad-cache retrieval problem
+
+What is limiting the current system:
+
+- the handler average is now under `10 ms`, but the tail is still above that target
+- remaining p95/p99 latency is mostly request-level variability, not candidate-generation cost
+- the end-to-end HTTP p95/p99 still includes framework and container overhead on top of the handler
+
+The next optimization work should focus on:
+
+1. reducing MAID fetch and deserialization cost
+2. deciding whether frequency state should move to a separate hot-path structure
+3. evaluating a server-side Redis Function to collapse identity resolution and candidate retrieval into one execution

@@ -59,11 +59,22 @@ def metrics_endpoint() -> Response:
 def rank(request: RankRequest) -> ORJSONResponse:
     request_started = perf_counter()
     user_started = perf_counter()
-    user, round_trips = repository.fetch_user(request.user_id)
+    resolved_id = request.user_id
+    round_trips = 0
+    if request.identity_token:
+        resolved_id, identity_round_trips = repository.resolve_identity(request.identity_token)
+        round_trips += identity_round_trips
+        if resolved_id is None:
+            metrics.record_request("/rank", "not_found", (perf_counter() - request_started) * 1000)
+            raise HTTPException(status_code=404, detail=f"Unknown identity_token {request.identity_token}")
+    if resolved_id is None:
+        raise HTTPException(status_code=422, detail="Provide either user_id or identity_token")
+    user, user_round_trips = repository.fetch_user(resolved_id)
+    round_trips += user_round_trips
     user_fetch_ms = (perf_counter() - user_started) * 1000
     if user is None:
         metrics.record_request("/rank", "not_found", (perf_counter() - request_started) * 1000)
-        raise HTTPException(status_code=404, detail=f"Unknown user_id {request.user_id}")
+        raise HTTPException(status_code=404, detail=f"Unknown user_id {resolved_id}")
 
     max_candidates = request.max_candidates or settings.max_candidates
     top_k = request.top_k or settings.top_k

@@ -13,16 +13,30 @@ class UserProfile(BaseModel):
     age_bucket: str
     interests: dict[str, float]
     segments: list[str]
+    identity_tokens: list[str] = Field(default_factory=list)
+    state: str = ""
+    postal_code: str = ""
+    device_type: str = "mobile"
+    card_tier: str = "Standard"
+    spend_tier: str = "medium"
+    frequency_history: dict[str, int] = Field(default_factory=dict)
     impression_count: int = 0
 
     def to_redis_hash(self) -> dict[str, str]:
         return {
             "user_id": self.user_id,
             "geo": self.geo,
+            "state": self.state,
+            "postal_code": self.postal_code,
             "device": self.device,
+            "device_type": self.device_type,
             "age_bucket": self.age_bucket,
+            "card_tier": self.card_tier,
+            "spend_tier": self.spend_tier,
             "interests_json": json.dumps(self.interests, sort_keys=True),
             "segments_json": json.dumps(self.segments),
+            "identity_tokens_json": json.dumps(self.identity_tokens),
+            "frequency_history_json": json.dumps(self.frequency_history, sort_keys=True),
             "impression_count": str(self.impression_count),
         }
 
@@ -31,10 +45,20 @@ class UserProfile(BaseModel):
         return cls(
             user_id=str(values["user_id"]),
             geo=str(values["geo"]),
+            state=str(values.get("state", "")),
+            postal_code=str(values.get("postal_code", "")),
             device=str(values["device"]),
+            device_type=str(values.get("device_type", "mobile")),
             age_bucket=str(values["age_bucket"]),
+            card_tier=str(values.get("card_tier", "Standard")),
+            spend_tier=str(values.get("spend_tier", "medium")),
             interests=json.loads(values["interests_json"]),
             segments=list(json.loads(values["segments_json"])),
+            identity_tokens=list(json.loads(values.get("identity_tokens_json", "[]"))),
+            frequency_history={
+                str(key): int(value)
+                for key, value in json.loads(values.get("frequency_history_json", "{}")).items()
+            },
             impression_count=int(values.get("impression_count", 0)),
         )
 
@@ -46,6 +70,14 @@ class Campaign(BaseModel):
     required_segments: list[str]
     any_of_segments: list[str] = Field(default_factory=list)
     none_of_segments: list[str] = Field(default_factory=list)
+    card_tiers: list[str] = Field(default_factory=lambda: ["*"])
+    geo_states: list[str] = Field(default_factory=list)
+    geo_postal_codes: list[str] = Field(default_factory=list)
+    device_types: list[str] = Field(default_factory=lambda: ["*"])
+    pacing_status: str = "active"
+    daily_budget_usd: float = 10000.0
+    spent_today_usd: float = 0.0
+    frequency_cap: int = 3
     weights: dict[str, float]
     bid: float
     freshness_boost: float = 0.0
@@ -59,6 +91,14 @@ class Campaign(BaseModel):
             "required_segments_json": json.dumps(self.required_segments),
             "any_of_segments_json": json.dumps(self.any_of_segments),
             "none_of_segments_json": json.dumps(self.none_of_segments),
+            "card_tiers_json": json.dumps(self.card_tiers),
+            "geo_states_json": json.dumps(self.geo_states),
+            "geo_postal_codes_json": json.dumps(self.geo_postal_codes),
+            "device_types_json": json.dumps(self.device_types),
+            "pacing_status": self.pacing_status,
+            "daily_budget_usd": str(self.daily_budget_usd),
+            "spent_today_usd": str(self.spent_today_usd),
+            "frequency_cap": str(self.frequency_cap),
             "weights_json": json.dumps(self.weights, sort_keys=True),
             "bid": str(self.bid),
             "freshness_boost": str(self.freshness_boost),
@@ -74,6 +114,14 @@ class Campaign(BaseModel):
             required_segments=list(json.loads(values["required_segments_json"])),
             any_of_segments=list(json.loads(values.get("any_of_segments_json", "[]"))),
             none_of_segments=list(json.loads(values.get("none_of_segments_json", "[]"))),
+            card_tiers=list(json.loads(values.get("card_tiers_json", '["*"]'))),
+            geo_states=list(json.loads(values.get("geo_states_json", "[]"))),
+            geo_postal_codes=list(json.loads(values.get("geo_postal_codes_json", "[]"))),
+            device_types=list(json.loads(values.get("device_types_json", '["*"]'))),
+            pacing_status=str(values.get("pacing_status", "active")),
+            daily_budget_usd=float(values.get("daily_budget_usd", 10000.0)),
+            spent_today_usd=float(values.get("spent_today_usd", 0.0)),
+            frequency_cap=int(values.get("frequency_cap", 3)),
             weights=json.loads(values["weights_json"]),
             bid=float(values["bid"]),
             freshness_boost=float(values.get("freshness_boost", 0.0)),
@@ -82,7 +130,8 @@ class Campaign(BaseModel):
 
 
 class RankRequest(BaseModel):
-    user_id: str
+    user_id: str | None = None
+    identity_token: str | None = None
     top_k: int | None = Field(default=None, ge=1, le=25)
     max_candidates: int | None = Field(default=None, ge=10, le=1000)
 
