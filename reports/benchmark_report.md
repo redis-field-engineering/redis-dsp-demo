@@ -8,11 +8,11 @@ The metric excludes HTTP/framework overhead but includes profile fetch and reran
 
 | Mode | Retrieval Shape | Avg SINTER Ops | Avg Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `maid_bruteforce_sinter` | legacy 26-probe SINTER plan | 26 | 28 | 28.701 | 124.332 |
-| `maid_tightened_sinter` | tightened pipelined SINTER plan | 3 | 3 | 5.102 | 31.929 |
-| `precomputed_segment` | direct aud:{maid} + maid_hot | 0 | 3 | 4.566 | 23.535 |
-| `hybrid_precompute_plus_realtime` | direct aud:{maid} + maid_hot + live gating | 0 | 3 | 4.133 | 43.152 |
-| `hybrid_bitmap_gating` | direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check | 0 | 2 | 2.9 | 14.899 |
+| `maid_bruteforce_sinter` | legacy 26-probe SINTER plan | 26 | 28 | 18.074 | 50.945 |
+| `maid_tightened_sinter` | tightened pipelined SINTER plan | 3 | 3 | 4.299 | 5.379 |
+| `precomputed_segment` | direct aud:{maid} + maid_hot | 0 | 3 | 2.687 | 4.484 |
+| `hybrid_precompute_plus_realtime` | direct aud:{maid} + maid_hot + live gating | 0 | 3 | 2.733 | 4.812 |
+| `hybrid_bitmap_gating` | direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check | 0 | 2 | 1.939 | 3.344 |
 
 ## Method Definitions
 
@@ -68,56 +68,56 @@ The metric excludes HTTP/framework overhead but includes profile fetch and reran
 
 ## Serial Live Load By Mode
 ### full_realtime
-- handler avg / p95 / p99 ms: 40.029 / 79.84 / 140.11
-- identity resolution avg / p95 / p99 ms: 2.346 / 3.355 / 56.064
-- profile fetch avg / p95 / p99 ms: 1.387 / 3.508 / 16.624
-- candidate generation avg / p95 / p99 ms: 0.094 / 0.217 / 0.27
-- avg candidates / eligible: 2500 / 24.579
+- handler avg / p95 / p99 ms: 53.479 / 112.5 / 116.398
+- identity resolution avg / p95 / p99 ms: 0.717 / 0.669 / 9.375
+- profile fetch avg / p95 / p99 ms: 0.49 / 0.523 / 1.374
+- candidate generation avg / p95 / p99 ms: 0.145 / 0.189 / 0.215
+- avg candidates / eligible: 2500 / 24.567
 - avg redis round trips: 4
 
 ### maid_bruteforce_sinter
-- decision-path p50 / p99 ms: 28.701 / 124.332
-- validated candidate p50 / p99 ms: 25.536 / 120.943
-- candidate generation avg / p95 / p99 ms: 32.834 / 74.259 / 105.826
+- decision-path p50 / p99 ms: 18.074 / 50.945
+- validated candidate p50 / p99 ms: 16.985 / 37.519
+- candidate generation avg / p95 / p99 ms: 15.359 / 16.979 / 18.514
 - avg SINTER ops / mode redis round trips: 26 / 28
 - avg candidates / eligible: 50 / 2.893
 
 ### maid_tightened_sinter
-- decision-path p50 / p99 ms: 5.102 / 31.929
-- validated candidate p50 / p99 ms: 3.297 / 21.52
-- candidate generation avg / p95 / p99 ms: 1.305 / 3.236 / 6.405
+- decision-path p50 / p99 ms: 4.299 / 5.379
+- validated candidate p50 / p99 ms: 3.162 / 3.858
+- candidate generation avg / p95 / p99 ms: 1.459 / 1.598 / 1.714
 - avg SINTER ops / mode redis round trips: 3 / 3
 - avg candidates / eligible: 50 / 12.57
 
 ### precomputed_segment
-- handler avg / p95 / p99 ms: 5.643 / 12.778 / 23.662
-- identity resolution avg / p95 / p99 ms: 1.151 / 3.014 / 5.226
-- profile fetch avg / p95 / p99 ms: 1.011 / 3.042 / 3.99
-- candidate generation avg / p95 / p99 ms: 0.819 / 2.025 / 3.714
-- decision-path p50 / p99 ms: 4.566 / 23.535
-- validated candidate p50 / p99 ms: 2.629 / 14.343
+- handler avg / p95 / p99 ms: 3.393 / 3.534 / 4.564
+- identity resolution avg / p95 / p99 ms: 0.507 / 0.594 / 0.699
+- profile fetch avg / p95 / p99 ms: 0.386 / 0.491 / 0.536
+- candidate generation avg / p95 / p99 ms: 0.308 / 0.405 / 0.463
+- decision-path p50 / p99 ms: 2.687 / 4.484
+- validated candidate p50 / p99 ms: 1.522 / 2.324
 - avg SINTER ops / mode redis round trips: 0 / 3
 - avg candidates / eligible: 30.083 / 24.529
 - avg redis round trips: 5
 
 ### hybrid_precompute_plus_realtime
-- handler avg / p95 / p99 ms: 6.022 / 15.956 / 43.229
-- identity resolution avg / p95 / p99 ms: 1.125 / 2.717 / 5.98
-- profile fetch avg / p95 / p99 ms: 0.86 / 2.573 / 3.03
-- candidate generation avg / p95 / p99 ms: 0.87 / 2.552 / 6.509
-- decision-path p50 / p99 ms: 4.133 / 43.152
-- validated candidate p50 / p99 ms: 2.294 / 18.838
+- handler avg / p95 / p99 ms: 3.0 / 3.617 / 4.899
+- identity resolution avg / p95 / p99 ms: 0.598 / 0.631 / 0.717
+- profile fetch avg / p95 / p99 ms: 0.478 / 0.529 / 0.606
+- candidate generation avg / p95 / p99 ms: 0.329 / 0.466 / 0.511
+- decision-path p50 / p99 ms: 2.733 / 4.812
+- validated candidate p50 / p99 ms: 1.596 / 2.146
 - avg SINTER ops / mode redis round trips: 0 / 3
 - avg candidates / eligible: 30.083 / 24.529
 - avg redis round trips: 5
 
 ### hybrid_bitmap_gating
-- handler avg / p95 / p99 ms: 3.66 / 10.458 / 14.939
-- identity resolution avg / p95 / p99 ms: 1.09 / 2.073 / 4.132
-- profile fetch avg / p95 / p99 ms: 0.795 / 2.281 / 3.801
-- candidate generation avg / p95 / p99 ms: 0.758 / 1.953 / 3.252
-- decision-path p50 / p99 ms: 2.9 / 14.899
-- validated candidate p50 / p99 ms: 1.066 / 6.248
+- handler avg / p95 / p99 ms: 2.047 / 2.591 / 3.399
+- identity resolution avg / p95 / p99 ms: 0.505 / 0.67 / 0.932
+- profile fetch avg / p95 / p99 ms: 0.379 / 0.49 / 0.529
+- candidate generation avg / p95 / p99 ms: 0.457 / 0.56 / 0.593
+- decision-path p50 / p99 ms: 1.939 / 3.344
+- validated candidate p50 / p99 ms: 0.831 / 1.095
 - avg SINTER ops / mode redis round trips: 0 / 2
 - avg candidates / eligible: 26.388 / 24.57
 - avg redis round trips: 4

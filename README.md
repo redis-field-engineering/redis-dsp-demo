@@ -194,32 +194,40 @@ Offline comparison on the full synthetic dataset (`4000` MAIDs, `2500` campaigns
 
 The key result is that once batch computes the full static targeting selection per MAID, the precomputed modes preserve the full real-time ranking output exactly while only looking at about `30` candidates instead of `2500`.
 
-## Live Serial Latency
+## Native VM Latency
 
-Serial live load against the current branch app:
+Serial live load on a dedicated GCP VM with native `redis-server` and native `uvicorn`:
 
-- `full_realtime`
-  - handler `37.106 ms` avg, `64.749 ms` p95, `85.748 ms` p99
-  - campaign materialization dominates because it evaluates the full campaign cache
+- VM shape: `n2-standard-8`
+- Redis: native `redis-server 7.0.15`
+- app host: native Python 3.11 process
+
+Decision-path latency from the current benchmark run:
+
+- `maid_bruteforce_sinter`
+  - decision path `18.074 ms` p50, `50.945 ms` p99
+  - validated candidates `16.985 ms` p50, `37.519 ms` p99
+  - average mode Redis round trips `28`
+- `maid_tightened_sinter`
+  - decision path `4.299 ms` p50, `5.379 ms` p99
+  - validated candidates `3.162 ms` p50, `3.858 ms` p99
+  - average mode Redis round trips `3`
 - `precomputed_segment`
-  - handler `5.643 ms` avg, `12.778 ms` p95, `23.662 ms` p99
-  - decision path `4.566 ms` p50, `23.535 ms` p99
-  - validated candidates `2.629 ms` p50, `14.343 ms` p99
+  - decision path `2.687 ms` p50, `4.484 ms` p99
+  - validated candidates `1.522 ms` p50, `2.324 ms` p99
+  - average mode Redis round trips `3`
 - `hybrid_precompute_plus_realtime`
-  - handler `6.022 ms` avg, `15.956 ms` p95, `43.229 ms` p99
-  - decision path `4.133 ms` p50, `43.152 ms` p99
-  - validated candidates `2.294 ms` p50, `18.838 ms` p99
-  - average Redis round trips `5`
+  - decision path `2.733 ms` p50, `4.812 ms` p99
+  - validated candidates `1.596 ms` p50, `2.146 ms` p99
+  - average mode Redis round trips `3`
 - `hybrid_bitmap_gating`
-  - handler `3.66 ms` avg, `10.458 ms` p95, `14.939 ms` p99
-  - decision path `2.9 ms` p50, `14.899 ms` p99
-  - validated candidates `1.066 ms` p50, `6.248 ms` p99
-  - candidate generation `0.758 ms` avg, `3.252 ms` p99
-  - average Redis round trips `4`
+  - decision path `1.939 ms` p50, `3.344 ms` p99
+  - validated candidates `0.831 ms` p50, `1.095 ms` p99
+  - candidate generation `0.457 ms` avg, `0.593 ms` p99
+  - average mode Redis round trips `2`
 
 Shadow execution smoke test for hybrid mode:
 
-- average request latency with `full_realtime` and `precomputed_segment` in shadow: `57.196 ms` handler
 - average overlap vs `full_realtime`: `1.0` top-result Jaccard
 - average overlap vs `precomputed_segment`: `1.0` top-result Jaccard
 
@@ -228,7 +236,21 @@ With direct per-MAID candidate lists, the main tradeoff changes:
 - `full_realtime` remains the baseline but is much too expensive online
 - `precomputed_segment` and `hybrid` preserve the same ranking output as `full_realtime` on the synthetic dataset
 - the bitmap-gated variant is currently the best live path because it eliminates campaign-state fanout and collapses frequency lookups into a single per-MAID hash
-- the remaining latency now comes mostly from identity resolution, `maid_hot` fetch, and residual candidate/frequency materialization rather than candidate selection itself
+- on a native VM, identity resolution, `maid_hot` fetch, candidate lookup, and campaign fetch all fall into sub-millisecond or low-single-digit-millisecond behavior instead of the noisier local-container tails
+
+## Reproducing The VM Benchmark
+
+The tested GCP Terraform scaffold is in [terraform/gcp/README.md](/Users/jeremy.plichta/work/mastercard-dsp/terraform/gcp/README.md).
+
+The benchmark flow on the VM is:
+
+1. Provision the VM with Terraform from `terraform/gcp`.
+2. Transfer the repo snapshot or clone the repo onto the VM.
+3. Create a venv and install the package with `pip install -e .`.
+4. Generate the synthetic dataset with `data.synthetic.generate_dataset(...)`.
+5. Load Redis with `python3 data/load_redis.py --redis-url redis://127.0.0.1:6379/0 --dataset-dir data/generated/synthetic`.
+6. Run the app with `REDIS_URL=redis://127.0.0.1:6379/0 python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+7. Run `python3 experiments/benchmark.py --base-url http://127.0.0.1:8000 --dataset-dir data/generated/synthetic --output reports/benchmark_report.md > reports/generated/hybrid_benchmark.json`.
 
 ## Repository Layout
 
