@@ -1,33 +1,75 @@
 # Redis DSP Candidate Generation Demo
 
-This repository is a production-shaped local prototype for a Redis-based DSP retrieval and reranking workflow. The primary path is a synthetic, identity-driven dataset that models:
+This repository is a production-shaped prototype for a Redis-based DSP retrieval and reranking workflow. The primary path is a synthetic, identity-driven dataset that models:
 
 - a neutral `MAID`-style profile cache
 - publisher-scoped identity tokens that resolve into a profile
-- an active ad cache with explicit targeting and delivery constraints
-- three side-by-side candidate selection modes:
-  - `full_realtime`
+- an active ad cache with explicit targeting, delivery constraints, and per-ad `taxonomy_filter` AND/OR/NOT expressions over float interest scores
+- six side-by-side candidate selection modes plus a `full_realtime` correctness baseline:
+  - `maid_bruteforce_sinter`
+  - `maid_tightened_sinter`
   - `precomputed_segment`
   - `hybrid_precompute_plus_realtime`
+  - `hybrid_bitmap_gating`
+  - `hybrid_bitmap_taxonomy`
 
-The goal is to compare quality and latency tradeoffs using plain Redis primitives, without introducing Redis Search.
+The goal is to compare quality and latency tradeoffs using plain Redis primitives.
+
+For the current retrieval comparison and measured latency results, see [reports/benchmark_report.md](reports/benchmark_report.md).
 
 ## Core Story
 
-The synthetic benchmark compares three execution styles over the same MAID and campaign dataset:
+The synthetic benchmark compares seven execution styles over the same MAID and campaign dataset:
 
 1. `full_realtime`
    - fetch the MAID
-   - evaluate the full campaign cache at request time
-2. `precomputed_segment`
+   - evaluate the full campaign universe live, including the per-campaign `taxonomy_filter`
+2. `maid_bruteforce_sinter`
+   - resolve the MAID
+   - run the original `26`-probe `SINTER` plan
+   - fetch state and rerank, including `taxonomy_filter`
+3. `maid_tightened_sinter`
+   - resolve the MAID
+   - run a compact `3`-probe `SINTER` plan
+   - fetch state and rerank, including `taxonomy_filter`
+4. `precomputed_segment`
    - fetch a prebuilt per-MAID candidate list
-   - apply only minimal live gating
-3. `hybrid_precompute_plus_realtime`
+   - apply only minimal live gating (pacing, budget, frequency)
+   - does **not** evaluate `taxonomy_filter`, so it admits campaigns that should be excluded
+5. `hybrid_precompute_plus_realtime`
    - fetch a prebuilt candidate list
-   - apply live pacing, budget, frequency, and exact targeting
+   - apply live pacing, budget, frequency, exact targeting, and `taxonomy_filter`
    - rerank the survivors
+6. `hybrid_bitmap_gating`
+   - fetch a prebuilt candidate list
+   - apply a server-side `bm:servable` bitmap gate
+   - enforce live frequency caps and rerank
+   - does **not** evaluate `taxonomy_filter`
+7. `hybrid_bitmap_taxonomy`
+   - same retrieval and bitmap-gate path as `hybrid_bitmap_gating`
+   - additionally evaluates each ad's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking
 
-This makes the latency and recall tradeoffs measurable instead of theoretical.
+This makes the latency and recall tradeoffs measurable instead of theoretical, and surfaces the cost of skipping the per-ad `taxonomy_filter` rather than burying it.
+
+## Methods At A Glance
+
+- `full_realtime`
+  - full live evaluation over the campaign universe; correctness baseline, not the preferred low-latency path
+- `maid_bruteforce_sinter`
+  - legacy MAID retrieval using `26` sequential `SINTER` probes (one Redis round trip each)
+- `maid_tightened_sinter`
+  - reduced MAID retrieval using `3` pipelined `SINTER` probes (one Redis round trip total)
+- `precomputed_segment`
+  - direct per-MAID candidate list plus minimal live gating; does not evaluate `taxonomy_filter`
+- `hybrid_precompute_plus_realtime`
+  - direct per-MAID candidate list plus full live gating, including `taxonomy_filter`
+- `hybrid_bitmap_gating`
+  - direct per-MAID candidate list plus server-side bitmap eligibility gate and live `fcap` check; does not evaluate `taxonomy_filter`
+- `hybrid_bitmap_taxonomy`
+  - same path as `hybrid_bitmap_gating` plus app-side `taxonomy_filter` evaluation against the MAID's float interest scores
+
+The benchmark report has the detailed method definitions, round trips, and p50/p99 comparisons:
+- [reports/benchmark_report.md](reports/benchmark_report.md)
 
 ## What The Repo Demonstrates
 
@@ -175,24 +217,32 @@ Source artifacts:
 - [reports/generated/evaluation.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/evaluation.json)
 - [reports/generated/hybrid_benchmark.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/hybrid_benchmark.json)
 - [reports/generated/hybrid_shadow_smoke.json](/Users/jeremy.plichta/work/mastercard-dsp/reports/generated/hybrid_shadow_smoke.json)
-- [reports/benchmark_report.md](/Users/jeremy.plichta/work/mastercard-dsp/reports/benchmark_report.md)
+- [reports/benchmark_report.md](reports/benchmark_report.md)
 
-Offline comparison on the full synthetic dataset (`4000` MAIDs, `2500` campaigns, `120000` interactions):
+Offline comparison on the full synthetic dataset (`4000` MAIDs, `2500` campaigns, `120000` interactions, `~80%` of campaigns carry a `taxonomy_filter` AND/OR/NOT expression):
 
 - `full_realtime`
-  - `NDCG@K 0.9813`
+  - `NDCG@K 0.9818`
   - `candidate recall 1.0`
   - `avg candidate count 2500`
-- `precomputed_segment`
-  - `NDCG@K 0.9813`
-  - `candidate recall 1.0`
+- `precomputed_segment` (no `taxonomy_filter`)
+  - `NDCG@K 0.5584`
+  - `top-result Jaccard vs full 0.40`
+  - admits campaigns the `taxonomy_filter` would reject
+- `hybrid_precompute_plus_realtime` (full live gating, including `taxonomy_filter`)
+  - `NDCG@K 0.9818`
   - `top-result Jaccard vs full 1.0`
-- `hybrid_precompute_plus_realtime`
-  - `NDCG@K 0.9813`
-  - `candidate recall 1.0`
-  - `top-result Jaccard vs full 1.0`
+- `hybrid_bitmap_gating` (no `taxonomy_filter`)
+  - `NDCG@K 0.5584`
+  - `top-result Jaccard vs full 0.40`
+- `hybrid_bitmap_taxonomy` (bitmap gate plus app-side `taxonomy_filter`)
+  - `NDCG@K 0.8751`
+  - `top-result Jaccard vs full 0.80`
 
-The key result is that once batch computes the full static targeting selection per MAID, the precomputed modes preserve the full real-time ranking output exactly while only looking at about `30` candidates instead of `2500`.
+Two independent properties show up in these numbers, both of which are structural rather than empirical:
+
+1. The precomputed candidate list is built from the full static targeting expression, so by construction `hybrid_precompute_plus_realtime` reaches the same eligible set as `full_realtime` while only fetching `~30` candidates instead of `2500`. This verifies the precompute does not lose information; it does not measure a ranking improvement.
+2. Modes that skip `taxonomy_filter` (`precomputed_segment`, `hybrid_bitmap_gating`) admit campaigns the per-ad rule would reject, and their ranking quality drops accordingly. The `hybrid_bitmap_taxonomy` mode closes most of that gap by evaluating the AND/OR/NOT expression in app memory after the bitmap gate; the residual gap vs `full_realtime` comes from the bitmap path skipping the live `campaign_state` fanout, which is the same tradeoff already documented for `hybrid_bitmap_gating`.
 
 ## Native VM Latency
 
@@ -202,29 +252,46 @@ Serial live load on a dedicated GCP VM with native `redis-server` and native `uv
 - Redis: native `redis-server 7.0.15`
 - app host: native Python 3.11 process
 
-Decision-path latency from the current benchmark run:
+Methodology:
 
+- 12 RPS, concurrency = 1, 10 s measured + 2 s warmup per mode → **N ≈ 120 samples per mode**.
+- p99 from N = 120 is essentially the second-largest observation. Read the p99 column as indicative, not as a tight bound. p50 is the reliable comparison point.
+- Hot/cold sampler: 70% of requests target a hot 20% of MAIDs.
+- These are serial-latency numbers. They do **not** characterize behavior under realistic concurrent bid traffic. A concurrent test at production scale is described in [`reports/full_scale_gcp_test_spec.md`](/Users/jeremy.plichta/work/mastercard-dsp/reports/full_scale_gcp_test_spec.md).
+- The numbers below are from the current native-VM benchmark run with `cache_campaigns_in_memory=False`, so campaign metadata fetch cost is included.
+
+Decision-path latency from the current native VM benchmark:
+
+- `full_realtime`
+  - decision path `236.653 ms` p50, `303.059 ms` p99
+  - validated candidates `235.704 ms` p50, `302.076 ms` p99
+  - average total Redis round trips `5`
 - `maid_bruteforce_sinter`
-  - decision path `18.074 ms` p50, `50.945 ms` p99
-  - validated candidates `16.985 ms` p50, `37.519 ms` p99
-  - average mode Redis round trips `28`
+  - decision path `19.790 ms` p50, `52.600 ms` p99
+  - validated candidates `18.814 ms` p50, `49.568 ms` p99
+  - average total Redis round trips `31`
 - `maid_tightened_sinter`
-  - decision path `4.299 ms` p50, `5.379 ms` p99
-  - validated candidates `3.162 ms` p50, `3.858 ms` p99
-  - average mode Redis round trips `3`
+  - decision path `7.254 ms` p50, `29.691 ms` p99
+  - validated candidates `6.222 ms` p50, `23.606 ms` p99
+  - average total Redis round trips `6`
 - `precomputed_segment`
-  - decision path `2.687 ms` p50, `4.484 ms` p99
-  - validated candidates `1.522 ms` p50, `2.324 ms` p99
-  - average mode Redis round trips `3`
+  - decision path `4.537 ms` p50, `18.180 ms` p99
+  - validated candidates `3.468 ms` p50, `16.415 ms` p99
+  - average total Redis round trips `6`
 - `hybrid_precompute_plus_realtime`
-  - decision path `2.733 ms` p50, `4.812 ms` p99
-  - validated candidates `1.596 ms` p50, `2.146 ms` p99
-  - average mode Redis round trips `3`
+  - decision path `4.691 ms` p50, `42.455 ms` p99
+  - validated candidates `3.531 ms` p50, `24.616 ms` p99
+  - average total Redis round trips `6`
 - `hybrid_bitmap_gating`
-  - decision path `1.939 ms` p50, `3.344 ms` p99
-  - validated candidates `0.831 ms` p50, `1.095 ms` p99
-  - candidate generation `0.457 ms` avg, `0.593 ms` p99
-  - average mode Redis round trips `2`
+  - decision path `3.991 ms` p50, `5.332 ms` p99
+  - validated candidates `2.816 ms` p50, `3.991 ms` p99
+  - candidate generation `0.525 ms` avg, `0.685 ms` p99
+  - average total Redis round trips `5`
+- `hybrid_bitmap_taxonomy`
+  - decision path `3.723 ms` p50, `9.916 ms` p99
+  - validated candidates `2.702 ms` p50, `8.684 ms` p99
+  - candidate generation `0.464 ms` avg, `0.616 ms` p99
+  - average total Redis round trips `5`
 
 Shadow execution smoke test for hybrid mode:
 
@@ -234,8 +301,9 @@ Shadow execution smoke test for hybrid mode:
 With direct per-MAID candidate lists, the main tradeoff changes:
 
 - `full_realtime` remains the baseline but is much too expensive online
-- `precomputed_segment` and `hybrid` preserve the same ranking output as `full_realtime` on the synthetic dataset
-- the bitmap-gated variant is currently the best live path because it eliminates campaign-state fanout and collapses frequency lookups into a single per-MAID hash
+- `hybrid_precompute_plus_realtime` preserves the same ranking output as `full_realtime` on the synthetic dataset while cutting the candidate set from `2500` ads to about `30`
+- `precomputed_segment` and `hybrid_bitmap_gating` are faster, but both intentionally skip `taxonomy_filter` and lose ranking quality as a result
+- `hybrid_bitmap_taxonomy` is the best low-latency path that still enforces the per-ad float-score `taxonomy_filter`, and on the native VM it stays under the `< 10 ms` decision-path p99 target
 - on a native VM, identity resolution, `maid_hot` fetch, candidate lookup, and campaign fetch all fall into sub-millisecond or low-single-digit-millisecond behavior instead of the noisier local-container tails
 
 ## Reproducing The VM Benchmark

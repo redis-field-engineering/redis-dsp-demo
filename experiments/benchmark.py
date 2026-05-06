@@ -9,6 +9,7 @@ from app.models import (
     FULL_REALTIME_MODE,
     HYBRID_MODE,
     HYBRID_BITMAP_MODE,
+    HYBRID_BITMAP_TAXONOMY_MODE,
     MAID_BRUTEFORCE_SINTER_MODE,
     MAID_TIGHTENED_SINTER_MODE,
     PRECOMPUTED_SEGMENT_MODE,
@@ -24,6 +25,11 @@ def build_report(
 ) -> str:
     modes = synthetic_mode_results["modes"]
     retrieval_overview_rows = [
+        (
+            FULL_REALTIME_MODE,
+            "full campaign materialization + live exact targeting + taxonomy_filter",
+            loadtest_results[FULL_REALTIME_MODE],
+        ),
         (
             MAID_BRUTEFORCE_SINTER_MODE,
             "legacy 26-probe SINTER plan",
@@ -49,6 +55,11 @@ def build_report(
             "direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check",
             loadtest_results[HYBRID_BITMAP_MODE],
         ),
+        (
+            HYBRID_BITMAP_TAXONOMY_MODE,
+            "bm:servable gate + live fcap + app-side taxonomy_filter on float scores",
+            loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE],
+        ),
     ]
     overview_table = [
         "## Retrieval Overview",
@@ -57,12 +68,20 @@ def build_report(
         "Every mode in this benchmark is invoked with an `identity_token`, so identity resolution is included in each row.",
         "The metric excludes HTTP/framework overhead but includes profile fetch and reranking only when that mode actually performs them.",
         "",
-        "| Mode | Retrieval Shape | Avg SINTER Ops | Avg Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |",
+        "### Methodology",
+        "",
+        "- **Workload shape:** serial requests at 12 RPS, concurrency = 1, 10s measured + 2s warmup per mode → **N ≈ 120 measured requests per mode**.",
+        "- **Sample sizing:** p99 from N = 120 is essentially the second-largest observation. Treat the p99 column as indicative; small absolute differences at p99 are within noise. p50 is the more reliable comparison point at this sample size.",
+        "- **Sampling:** the load driver picks a hot 20% of MAIDs on 70% of requests and a cold 80% of MAIDs on 30%, so cache locality is intentionally favorable.",
+        "- **Concurrency:** these numbers measure the serial latency floor of each path. They do **not** measure behavior under realistic concurrent bid traffic. A concurrent load test against the same cluster shape is out of scope for this report and is called out in the GCP scaling spec.",
+        "- **Redis cache:** the FastAPI service runs with `cache_campaigns_in_memory=False` so every campaign-metadata fetch goes through Redis. The avg / p99 numbers therefore include the actual round-trip cost of reading campaign hashes from `redis-server`.",
+        "",
+        "| Mode | Retrieval Shape | Avg SINTER Ops | Avg Total Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |",
         "| --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for mode_name, retrieval_shape, stats in retrieval_overview_rows:
         overview_table.append(
-            f"| `{mode_name}` | {retrieval_shape} | {stats['avg_sinter_ops']} | {stats['avg_mode_redis_round_trips']} | {stats['decision_path_p50_latency_ms']} | {stats['decision_path_p99_latency_ms']} |"
+            f"| `{mode_name}` | {retrieval_shape} | {stats['avg_sinter_ops']} | {stats['avg_redis_round_trips']} | {stats['decision_path_p50_latency_ms']} | {stats['decision_path_p99_latency_ms']} |"
         )
     method_definitions = [
         "## Method Definitions",
@@ -77,6 +96,8 @@ def build_report(
         "  Uses the same `maid_hot:{maid_id}` and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.",
         f"- `{HYBRID_BITMAP_MODE}`",
         "  Uses `maid_hot:{maid_id}` and `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.",
+        f"- `{HYBRID_BITMAP_TAXONOMY_MODE}`",
+        "  Same retrieval and bitmap-gating path as `hybrid_bitmap_gating`, but additionally evaluates each surviving campaign's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking. This is the path that closes the gap between batch precompute and per-ad threshold-based targeting on continuous taxonomy scores.",
         f"- `{FULL_REALTIME_MODE}`",
         "  Resolves the identity token, fetches the full MAID profile, materializes the entire campaign universe, filters everything live, and reranks the surviving set. It is the correctness baseline, not the preferred low-latency design.",
     ]
@@ -124,6 +145,18 @@ def build_report(
             f"- Top Result Jaccard vs Full: {modes[HYBRID_MODE]['top_result_jaccard_vs_full_realtime']}",
             f"- Avg Candidates: {modes[HYBRID_MODE]['candidate_count']}",
             f"- Avg Eligible: {modes[HYBRID_MODE]['eligible_count']}",
+            "",
+            "### Hybrid Bitmap + Taxonomy Mode",
+            f"- NDCG@K: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['ndcg_at_k']}",
+            f"- Precision@K: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['precision_at_k']}",
+            f"- Recall@K: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['recall_at_k']}",
+            f"- F1@K: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['f1_at_k']}",
+            f"- Candidate Recall: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['candidate_generation_recall']}",
+            f"- Eligible Recall: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['eligible_recall']}",
+            f"- Eligible Set Jaccard vs Full: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['eligible_set_jaccard_vs_full_realtime']}",
+            f"- Top Result Jaccard vs Full: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['top_result_jaccard_vs_full_realtime']}",
+            f"- Avg Candidates: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['candidate_count']}",
+            f"- Avg Eligible: {modes[HYBRID_BITMAP_TAXONOMY_MODE]['eligible_count']}",
             "",
             "## Serial Live Load By Mode",
             f"### {FULL_REALTIME_MODE}",
@@ -180,6 +213,18 @@ def build_report(
             f"- avg SINTER ops / mode redis round trips: {loadtest_results[HYBRID_BITMAP_MODE]['avg_sinter_ops']} / {loadtest_results[HYBRID_BITMAP_MODE]['avg_mode_redis_round_trips']}",
             f"- avg candidates / eligible: {loadtest_results[HYBRID_BITMAP_MODE]['avg_candidate_count']} / {loadtest_results[HYBRID_BITMAP_MODE]['avg_eligible_count']}",
             f"- avg redis round trips: {loadtest_results[HYBRID_BITMAP_MODE]['avg_redis_round_trips']}",
+            "",
+            f"### {HYBRID_BITMAP_TAXONOMY_MODE}",
+            f"- handler avg / p95 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['handler_avg_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['handler_p95_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['handler_p99_latency_ms']}",
+            f"- identity resolution avg / p95 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['identity_resolution_avg_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['identity_resolution_p95_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['identity_resolution_p99_latency_ms']}",
+            f"- profile fetch avg / p95 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['profile_fetch_avg_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['profile_fetch_p95_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['profile_fetch_p99_latency_ms']}",
+            f"- candidate generation avg / p95 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['candidate_generation_avg_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['candidate_generation_p95_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['candidate_generation_p99_latency_ms']}",
+            f"- filtering avg / p95 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['filtering_avg_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['filtering_p95_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['filtering_p99_latency_ms']}",
+            f"- decision-path p50 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['decision_path_p50_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['decision_path_p99_latency_ms']}",
+            f"- validated candidate p50 / p99 ms: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['validated_candidate_p50_latency_ms']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['validated_candidate_p99_latency_ms']}",
+            f"- avg SINTER ops / mode redis round trips: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['avg_sinter_ops']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['avg_mode_redis_round_trips']}",
+            f"- avg candidates / eligible: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['avg_candidate_count']} / {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['avg_eligible_count']}",
+            f"- avg redis round trips: {loadtest_results[HYBRID_BITMAP_TAXONOMY_MODE]['avg_redis_round_trips']}",
         ]
     )
 
@@ -225,6 +270,7 @@ def main() -> None:
             PRECOMPUTED_SEGMENT_MODE,
             HYBRID_MODE,
             HYBRID_BITMAP_MODE,
+            HYBRID_BITMAP_TAXONOMY_MODE,
         )
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

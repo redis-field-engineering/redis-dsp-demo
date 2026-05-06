@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     max_candidates: int = 50
     strong_signal_count: int = 2
     precomputed_candidate_limit: int = 150
-    cache_campaigns_in_memory: bool = True
+    cache_campaigns_in_memory: bool = False
     auto_bootstrap_data: bool = False
     synthetic_users: int = Field(default=4000, ge=100)
     synthetic_campaigns: int = Field(default=2500, ge=100)

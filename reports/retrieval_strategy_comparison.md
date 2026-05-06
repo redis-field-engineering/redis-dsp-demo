@@ -1,13 +1,6 @@
 # Retrieval Strategy Comparison
 
-This comparison uses a richer synthetic dataset designed to stress candidate-generation behavior more directly than the original synthetic path.
-
-The dataset includes:
-
-- wildcard geo/device campaigns
-- `any_of_segments`
-- `none_of_segments`
-- more multi-interest users
+This compares two SINTER-based candidate-generation strategies on the standard synthetic dataset (same generator and seed as the main benchmark — the comparison is about the strategy, not the data). The dataset already contains wildcard geo/device campaigns, `any_of_segments`, `none_of_segments`, and per-user multi-segment profiles.
 
 Strategies compared:
 

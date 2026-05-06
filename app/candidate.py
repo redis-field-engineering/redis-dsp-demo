@@ -2,8 +2,31 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 
-from app.models import Campaign, UserProfile
+from app.models import Campaign, ScoringProfile, UserProfile
 from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES
+
+
+def evaluate_taxonomy_filter(node: object, scores: Mapping[str, float]) -> bool:
+    """Evaluate a taxonomy filter AST against a user's float interest scores.
+
+    Leaves are `{"gte": ["label", threshold]}` (label is missing → score 0).
+    Internal nodes are `{"and": [...]}`, `{"or": [...]}`, `{"not": <child>}`.
+    A `None` filter is treated as a match.
+    """
+    if node is None:
+        return True
+    if not isinstance(node, dict):
+        raise TypeError(f"Unsupported taxonomy_filter node: {node!r}")
+    if "gte" in node:
+        label, threshold = node["gte"]
+        return float(scores.get(label, 0.0)) >= float(threshold)
+    if "and" in node:
+        return all(evaluate_taxonomy_filter(child, scores) for child in node["and"])
+    if "or" in node:
+        return any(evaluate_taxonomy_filter(child, scores) for child in node["or"])
+    if "not" in node:
+        return not evaluate_taxonomy_filter(node["not"], scores)
+    raise ValueError(f"Unsupported taxonomy_filter operator: {sorted(node)}")
 
 
 def build_candidate_lookup_keys(
@@ -151,7 +174,16 @@ def filter_campaigns_for_user(user: UserProfile, campaigns: Iterable[Campaign]) 
         and set(campaign.required_segments).issubset(user_segments)
         and (not campaign.any_of_segments or bool(user_segments.intersection(campaign.any_of_segments)))
         and not user_segments.intersection(campaign.none_of_segments)
+        and evaluate_taxonomy_filter(campaign.taxonomy_filter, user.interests)
     ]
+
+
+def passes_taxonomy_filter(
+    user_or_profile: UserProfile | ScoringProfile,
+    campaign: Campaign,
+) -> bool:
+    """Convenience wrapper used by serving-time filters that have a ScoringProfile."""
+    return evaluate_taxonomy_filter(campaign.taxonomy_filter, user_or_profile.interests)
 
 
 def build_indexes(campaigns: Sequence[Campaign]) -> dict[str, set[str]]:

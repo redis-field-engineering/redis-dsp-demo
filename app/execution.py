@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from time import perf_counter
 
+from app.candidate import evaluate_taxonomy_filter
 from app.models import (
     FULL_REALTIME_MODE,
     HYBRID_MODE,
     HYBRID_BITMAP_MODE,
+    HYBRID_BITMAP_TAXONOMY_MODE,
     MAID_BRUTEFORCE_SINTER_MODE,
     MAID_TIGHTENED_SINTER_MODE,
     PRECOMPUTED_SEGMENT_MODE,
@@ -60,7 +62,7 @@ def execute_mode(
         mode=mode,
         candidate_ids=candidate_ids,
     )
-    if mode == HYBRID_BITMAP_MODE:
+    if mode in {HYBRID_BITMAP_MODE, HYBRID_BITMAP_TAXONOMY_MODE}:
         states = {}
         state_round_trips = 0
     else:
@@ -80,7 +82,15 @@ def execute_mode(
         eligible = filter_campaigns_for_user(runtime_user, runtime_campaigns)
     else:
         runtime_user = scoring_profile
-        if mode == HYBRID_BITMAP_MODE:
+        if mode == HYBRID_BITMAP_TAXONOMY_MODE:
+            if scoring_profile is None:
+                raise ValueError(f"{mode} mode requires a scoring profile for taxonomy evaluation")
+            eligible = _frequency_and_taxonomy_filter(
+                runtime_campaigns,
+                fcap_counts,
+                scoring_profile.interests,
+            )
+        elif mode == HYBRID_BITMAP_MODE:
             eligible = _frequency_only_filter(runtime_campaigns, fcap_counts)
         else:
             eligible = _minimal_live_filter(runtime_campaigns, fcap_counts)
@@ -149,7 +159,7 @@ def _retrieve_candidate_ids(
             limit=max_candidates,
         )
         return candidate_ids, candidate_round_trips, 0
-    if mode == HYBRID_BITMAP_MODE:
+    if mode in {HYBRID_BITMAP_MODE, HYBRID_BITMAP_TAXONOMY_MODE}:
         candidate_ids, candidate_round_trips = repository.fetch_bitmap_gated_user_candidates(
             maid_id,
             limit=max_candidates,
@@ -232,6 +242,21 @@ def _frequency_only_filter(
     eligible: list[Campaign] = []
     for campaign in campaigns:
         if fcap_counts.get(campaign.campaign_id, 0) >= campaign.frequency_cap:
+            continue
+        eligible.append(campaign)
+    return eligible
+
+
+def _frequency_and_taxonomy_filter(
+    campaigns: list[Campaign],
+    fcap_counts: dict[str, int],
+    interests: dict[str, float],
+) -> list[Campaign]:
+    eligible: list[Campaign] = []
+    for campaign in campaigns:
+        if fcap_counts.get(campaign.campaign_id, 0) >= campaign.frequency_cap:
+            continue
+        if not evaluate_taxonomy_filter(campaign.taxonomy_filter, interests):
             continue
         eligible.append(campaign)
     return eligible

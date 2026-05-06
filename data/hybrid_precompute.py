@@ -44,6 +44,16 @@ def _precompute_user_candidates(
 
 
 def _matches_static_targeting(user: UserProfile, campaign: Campaign) -> bool:
+    """Match the static targeting fields used by the precompute.
+
+    Note: the per-campaign `taxonomy_filter` is *not* evaluated here. Taxonomy
+    scores can drift between batch precompute and bid time (an online
+    feedback path may rewrite individual labels between batches), so the
+    filter must be evaluated online against the current `maid_hot:{maid_id}`
+    interests. The per-MAID candidate list therefore over-approximates by
+    the taxonomy_filter pass rate; the online taxonomy mode
+    (`hybrid_bitmap_taxonomy`) closes that gap.
+    """
     user_segments = set(user.segments)
     return (
         _matches_dimension(user.geo, campaign.geo)

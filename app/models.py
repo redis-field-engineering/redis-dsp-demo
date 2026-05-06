@@ -10,6 +10,7 @@ FULL_REALTIME_MODE = "full_realtime"
 PRECOMPUTED_SEGMENT_MODE = "precomputed_segment"
 HYBRID_MODE = "hybrid_precompute_plus_realtime"
 HYBRID_BITMAP_MODE = "hybrid_bitmap_gating"
+HYBRID_BITMAP_TAXONOMY_MODE = "hybrid_bitmap_taxonomy"
 MAID_BRUTEFORCE_SINTER_MODE = "maid_bruteforce_sinter"
 MAID_TIGHTENED_SINTER_MODE = "maid_tightened_sinter"
 CANDIDATE_MODES = [
@@ -17,6 +18,7 @@ CANDIDATE_MODES = [
     PRECOMPUTED_SEGMENT_MODE,
     HYBRID_MODE,
     HYBRID_BITMAP_MODE,
+    HYBRID_BITMAP_TAXONOMY_MODE,
     MAID_BRUTEFORCE_SINTER_MODE,
     MAID_TIGHTENED_SINTER_MODE,
 ]
@@ -127,6 +129,7 @@ class Campaign(BaseModel):
     bid: float
     freshness_boost: float = 0.0
     age_in_days: int = 0
+    taxonomy_filter: dict[str, Any] | None = None
 
     def to_redis_hash(self) -> dict[str, str]:
         return {
@@ -148,6 +151,7 @@ class Campaign(BaseModel):
             "bid": str(self.bid),
             "freshness_boost": str(self.freshness_boost),
             "age_in_days": str(self.age_in_days),
+            "taxonomy_filter_json": json.dumps(self.taxonomy_filter) if self.taxonomy_filter is not None else "",
         }
 
     @classmethod
@@ -171,6 +175,11 @@ class Campaign(BaseModel):
             bid=float(values["bid"]),
             freshness_boost=float(values.get("freshness_boost", 0.0)),
             age_in_days=int(values.get("age_in_days", 0)),
+            taxonomy_filter=(
+                json.loads(values["taxonomy_filter_json"])
+                if values.get("taxonomy_filter_json")
+                else None
+            ),
         )
 
 

@@ -114,7 +114,29 @@ def campaign_is_eligible(user: UserProfile, campaign: Campaign) -> bool:
         and set(campaign.required_segments).issubset(user_segments)
         and (not campaign.any_of_segments or bool(user_segments.intersection(campaign.any_of_segments)))
         and not user_segments.intersection(campaign.none_of_segments)
+        and _passes_taxonomy_filter(campaign.taxonomy_filter, user.interests)
     )
+
+
+def _passes_taxonomy_filter(node: object, scores: dict[str, float]) -> bool:
+    """Avoid an import cycle by inlining a small evaluator here.
+
+    Mirrors `app.candidate.evaluate_taxonomy_filter`. Kept in sync by tests.
+    """
+    if node is None:
+        return True
+    if not isinstance(node, dict):
+        raise TypeError(f"Unsupported taxonomy_filter node: {node!r}")
+    if "gte" in node:
+        label, threshold = node["gte"]
+        return float(scores.get(label, 0.0)) >= float(threshold)
+    if "and" in node:
+        return all(_passes_taxonomy_filter(child, scores) for child in node["and"])
+    if "or" in node:
+        return any(_passes_taxonomy_filter(child, scores) for child in node["or"])
+    if "not" in node:
+        return not _passes_taxonomy_filter(node["not"], scores)
+    raise ValueError(f"Unsupported taxonomy_filter operator: {sorted(node)}")
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

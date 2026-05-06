@@ -72,6 +72,87 @@ def generate_users(config: SyntheticConfig) -> list[UserProfile]:
     return users
 
 
+_TAXONOMY_FILTER_THRESHOLDS = (0.30, 0.35, 0.45, 0.55)
+
+
+def _build_taxonomy_filter(
+    random: Random,
+    positive_features: list[str],
+    negative_features: list[str],
+    skip_probability: float = 0.20,
+) -> dict | None:
+    """Build a taxonomy_filter AST that mirrors the five patterns in the requirements PDF.
+
+    Thresholds are kept correlated with the synthetic user population so that
+    a meaningful fraction of users pass each clause, rather than calibrated to
+    realistic production thresholds (which would tend toward zero recall on
+    the synthetic dataset). The point of this filter is to exercise the
+    AND / OR / NOT evaluator structure end-to-end, not to faithfully reproduce
+    any specific production score distribution.
+    """
+    if not positive_features or random.random() < skip_probability:
+        return None
+
+    threshold = lambda: random.choice(_TAXONOMY_FILTER_THRESHOLDS)
+    positives = positive_features[:4]
+    negatives = negative_features[:2]
+    pattern = random.random()
+
+    # Pattern 1: simple AND across two positive features.
+    if pattern < 0.25 or len(positives) < 2:
+        labels = positives[:2] if len(positives) >= 2 else positives
+        return {"and": [{"gte": [label, threshold()]} for label in labels]}
+
+    # Pattern 2: AND with a NOT on a negative feature.
+    if pattern < 0.45 and negatives:
+        return {
+            "and": [
+                {"gte": [positives[0], threshold()]},
+                {"not": {"gte": [negatives[0], threshold()]}},
+            ]
+        }
+
+    # Pattern 3: OR inside AND.
+    if pattern < 0.65 and len(positives) >= 3:
+        return {
+            "and": [
+                {"or": [
+                    {"gte": [positives[0], threshold()]},
+                    {"gte": [positives[1], threshold()]},
+                ]},
+                {"gte": [positives[2], threshold()]},
+            ]
+        }
+
+    # Pattern 4: AND with a nested OR.
+    if pattern < 0.85 and len(positives) >= 3:
+        return {
+            "and": [
+                {"gte": [positives[0], threshold()]},
+                {"or": [
+                    {"gte": [positives[1], threshold()]},
+                    {"gte": [positives[2], threshold()]},
+                ]},
+            ]
+        }
+
+    # Pattern 5: NOT on an OR group of negatives, gated by a positive AND.
+    if negatives and len(negatives) >= 1 and len(positives) >= 2:
+        not_terms = [{"gte": [negatives[0], threshold()]}]
+        if len(negatives) >= 2:
+            not_terms.append({"gte": [negatives[1], threshold()]})
+        return {
+            "and": [
+                {"gte": [positives[0], threshold()]},
+                {"gte": [positives[1], threshold()]},
+                {"not": {"or": not_terms} if len(not_terms) > 1 else not_terms[0]},
+            ]
+        }
+
+    # Fallback: simple AND.
+    return {"and": [{"gte": [positives[0], threshold()]}]}
+
+
 def generate_campaigns(config: SyntheticConfig) -> list[Campaign]:
     random = Random(config.seed + 1)
     features = FEATURES[: config.feature_count]
@@ -125,6 +206,22 @@ def generate_campaigns(config: SyntheticConfig) -> list[Campaign]:
                 for feature in negative_features[: random.randint(1, min(2, len(negative_features)))]
             ]
 
+        # Taxonomy filter built from the campaign's positive and negative weights.
+        # Reuse the same feature ordering so the filter is correlated with the
+        # ranking weights, mirroring the way a realistic per-campaign taxonomy
+        # rule is correlated with that campaign's bid model.
+        positive_filter_features = top_positive_features
+        negative_filter_features = [
+            feature
+            for feature, weight in sorted(weights.items(), key=lambda item: item[1])
+            if weight < 0.0
+        ]
+        taxonomy_filter = _build_taxonomy_filter(
+            random,
+            positive_filter_features,
+            negative_filter_features,
+        )
+
         geo = ["*"] if random.random() < 0.18 else random.sample(GEOS, k=random.randint(1, min(2, len(GEOS))))
         geo_states = _sample_geo_states(random, geo)
         geo_postal_codes = _sample_postal_codes(random, geo_states)
@@ -157,6 +254,7 @@ def generate_campaigns(config: SyntheticConfig) -> list[Campaign]:
                 bid=round(random.uniform(0.5, 4.0), 3),
                 freshness_boost=round(random.uniform(0.0, 0.6), 3),
                 age_in_days=random.randint(0, 90),
+                taxonomy_filter=taxonomy_filter,
             )
         )
     return campaigns
@@ -257,6 +355,7 @@ def generate_dataset(
         "wildcard_card_tier_campaigns": sum("*" in campaign.card_tiers for campaign in campaigns),
         "any_of_campaigns": sum(bool(campaign.any_of_segments) for campaign in campaigns),
         "none_of_campaigns": sum(bool(campaign.none_of_segments) for campaign in campaigns),
+        "taxonomy_filter_campaigns": sum(campaign.taxonomy_filter is not None for campaign in campaigns),
         "state_targeted_campaigns": sum(bool(campaign.geo_states) for campaign in campaigns),
         "postal_targeted_campaigns": sum(bool(campaign.geo_postal_codes) for campaign in campaigns),
         "paused_campaigns": sum(campaign.pacing_status != "active" for campaign in campaigns),

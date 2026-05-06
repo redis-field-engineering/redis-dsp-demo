@@ -7,11 +7,17 @@ from statistics import mean
 
 import pandas as pd
 
-from app.candidate import build_indexes, filter_campaigns_for_user, generate_candidates_in_memory
+from app.candidate import (
+    build_indexes,
+    evaluate_taxonomy_filter,
+    filter_campaigns_for_user,
+    generate_candidates_in_memory,
+)
 from app.models import (
     FULL_REALTIME_MODE,
     HYBRID_MODE,
     HYBRID_BITMAP_MODE,
+    HYBRID_BITMAP_TAXONOMY_MODE,
     PRECOMPUTED_SEGMENT_MODE,
     Campaign,
     UserProfile,
@@ -124,7 +130,13 @@ def evaluate_synthetic_modes(
     campaigns = [Campaign.model_validate(item) for item in read_jsonl(dataset_dir / "campaigns.jsonl")]
     campaign_by_id = {campaign.campaign_id: campaign for campaign in campaigns}
     user_candidates = _load_user_candidates(dataset_dir)
-    mode_names = [FULL_REALTIME_MODE, PRECOMPUTED_SEGMENT_MODE, HYBRID_MODE, HYBRID_BITMAP_MODE]
+    mode_names = [
+        FULL_REALTIME_MODE,
+        PRECOMPUTED_SEGMENT_MODE,
+        HYBRID_MODE,
+        HYBRID_BITMAP_MODE,
+        HYBRID_BITMAP_TAXONOMY_MODE,
+    ]
     metric_buckets = {
         mode_name: {
             "ndcg_at_k": [],
@@ -360,6 +372,8 @@ def _execute_synthetic_mode(
         for campaign_id in candidate_ids
         if campaign_id in campaign_by_id
     ]
+    if mode == HYBRID_BITMAP_TAXONOMY_MODE:
+        return candidate_ids, _frequency_and_taxonomy_filter(user, candidate_campaigns)
     if mode in {PRECOMPUTED_SEGMENT_MODE, HYBRID_BITMAP_MODE}:
         return candidate_ids, _minimal_live_filter(user, candidate_campaigns)
     return candidate_ids, filter_campaigns_for_user(user, candidate_campaigns)
@@ -373,6 +387,17 @@ def _minimal_live_filter(user: UserProfile, campaigns: list[Campaign]) -> list[C
         if campaign.spent_today_usd >= campaign.daily_budget_usd:
             continue
         if user.frequency_history.get(campaign.campaign_id, 0) >= campaign.frequency_cap:
+            continue
+        eligible.append(campaign)
+    return eligible
+
+
+def _frequency_and_taxonomy_filter(user: UserProfile, campaigns: list[Campaign]) -> list[Campaign]:
+    eligible: list[Campaign] = []
+    for campaign in campaigns:
+        if user.frequency_history.get(campaign.campaign_id, 0) >= campaign.frequency_cap:
+            continue
+        if not evaluate_taxonomy_filter(campaign.taxonomy_filter, user.interests):
             continue
         eligible.append(campaign)
     return eligible
