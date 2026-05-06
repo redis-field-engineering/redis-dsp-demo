@@ -139,13 +139,42 @@ The Flex variants land at roughly the same cluster RAM (~2 TB) regardless of sha
 
 ### 1.7 Node sizing — Option A: All-RAM
 
-| Node shape | Usable RAM/node | Shards/node (CPU-bound) | Nodes for 1600 shards |
-| --- | --- | --- | --- |
-| `n2-highmem-32` (256 GB) | ~200 GB | ~8 | ~200 |
-| `n2-highmem-64` (512 GB) | ~400 GB | ~12–16 | ~110 |
-| `n2-highmem-80` (640 GB) | ~500 GB | ~16–20 | ~80 |
+The All-RAM cluster needs to host ~40 TB of cluster RAM (1600 shards × ~25 GB) with enough vCPU per node to drive ~25 K ops/s/shard without tail-latency degradation. Larger node shapes give fewer total nodes but a larger blast radius per failure. GCP options across the relevant memory range:
 
-**Working assumption: 75 × `n2-highmem-64` with rack-zone awareness across 3 GCP zones (25 nodes per zone).** This gives a reasonable shard density, headroom for proxy CPU on each node, and tolerates a single-zone outage.
+| Node shape | vCPU | RAM | Usable RAM (~90%) | Shards/node (limit) | Nodes for 1600 shards |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `n2-highmem-64` | 64 | 512 GB | ~460 GB | ~18 (RAM-bound) | ~90 |
+| `n2-highmem-128` | 128 | 864 GB | ~780 GB | ~30 (RAM-bound) | ~55 |
+| `m3-megamem-128` | 128 | 1.95 TB | ~1.7 TB | ~64 (CPU-bound at ~1 vCPU/shard) | ~25 |
+| `m1-ultramem-160` | 160 | 3.75 TB | ~3.4 TB | ~80 (CPU-bound) | ~20 |
+| `m3-ultramem-128` | 128 | 3.9 TB | ~3.5 TB | ~64 (CPU-bound) | ~25 |
+| `m2-ultramem-208` | 208 | 5.75 TB | ~5.2 TB | ~140 (CPU-bound at ~1.5 vCPU/shard) | ~12 |
+| `m2-ultramem-416` | 416 | 11.5 TB | ~10.4 TB | ~280 (CPU-bound) | ~6 |
+
+(All capacities are GCP per-VM specs at the time of writing — re-verify against the GCP machine-types reference at apply time. The "Shards/node" column applies the lower of the CPU-driven and RAM-driven caps. CPU per shard is sized at ~1.5 vCPU to leave headroom for cluster proxy, replication, and metrics overhead.)
+
+#### 1.7.A Blast radius vs node count
+
+Bigger nodes mean fewer total nodes but more shards (and more RAM) lost when any one fails:
+
+| Node shape | Cluster size | Shards lost per node failure | RAM lost per node failure | Single-node loss as % of cluster |
+| --- | --- | ---: | ---: | ---: |
+| `n2-highmem-64` | ~75 nodes | ~18 | ~450 GB | ~1.3% |
+| `m1-ultramem-160` | ~20 nodes | ~80 | ~2.0 TB | ~5% |
+| `m2-ultramem-208` | ~12 nodes | ~140 | ~3.5 TB | ~8% |
+| `m2-ultramem-416` | ~6 nodes | ~280 | ~7.0 TB | ~17% |
+
+The 6-node `m2-ultramem-416` configuration is too aggressive: 17% capacity loss on a single-node failure is hard to absorb without violating per-shard p99 SLOs during the rebalance window. The 12-node `m2-ultramem-208` configuration is the practical sweet spot — small enough for 12-fold node count reduction, large enough that one node failure is recoverable inside the cluster's spare capacity.
+
+**Working assumption: 12 × `m2-ultramem-208` across 3 GCP zones (4 nodes per zone).** This gives:
+
+- ~140 shards per node (1680 total capacity vs 1600 needed → ~5% headroom).
+- 4 nodes per zone → zone-failure tolerance: any single zone going dark drops cluster capacity by ~33%, recoverable from the other 8 nodes' replicas.
+- Single-node loss is ~8% of cluster capacity, absorbable inside the ~5% headroom plus replica promotion.
+
+**Fallback: 20 × `m1-ultramem-160` across 3 zones (~6–7 nodes per zone)** if the 8% single-node blast radius on `m2-ultramem-208` is judged too high. That puts each node failure at ~5% of cluster capacity at the cost of ~67% more nodes.
+
+**Conservative fallback: 25 × `m3-megamem-128`** (~9 per zone) for an even smaller blast radius (~4% per node) on a newer Sapphire Rapids platform.
 
 ### 1.8 Node sizing — Option B: Redis Flex
 
@@ -198,11 +227,12 @@ The Flex p99 estimate brushes against the 10 ms end-to-end SLA, so this is the s
 | Total shards | ~1600 | ~160 | ~900 |
 | Cluster RAM | ~40 TB | ~2 TB | ~2 TB |
 | Cluster SSD | 0 | ~38 TB | ~38 TB |
-| Compute nodes | ~75 (`n2-highmem-64`) | ~9 (`n2-highmem-64` + 6 TB lssd) | ~36 (`n2-highmem-64` + 6 TB lssd) |
+| Compute nodes | ~12 (`m2-ultramem-208`) | ~9 (`n2-highmem-64` + 6 TB lssd) | ~36 (`n2-highmem-64` + 6 TB lssd) |
+| Single-node blast radius | ~8% of cluster | ~12% of cluster | ~3% of cluster |
 | Bid p99 vs 10 ms budget | comfortable | **needs measurement** (cold-key SSD reads) | needs measurement, less risk than capacity-sized |
 | Operational complexity | lower (single tier) | higher (RAM ratio, working-set warmup) | higher |
 
-**Recommendation for the first scale test: run both All-RAM and Flex (throughput-sized).** That gives a side-by-side comparison of bid-decision latency at the 1 M bid/s target across two clusters with roughly 2× difference in node count (~75 vs ~36) and very different RAM/SSD compositions. If Flex p99 stays under 10 ms with margin, the smaller node count may be worth the operational complexity.
+**Recommendation for the first scale test: run both All-RAM and Flex (throughput-sized).** That gives a side-by-side comparison of bid-decision latency at the 1 M bid/s target. The two clusters differ in shape rather than count: ~12 very-high-RAM `m2-ultramem-208` nodes (All-RAM, ~3.5 TB RAM per node) vs ~36 mid-density `n2-highmem-64 + 6 TB local SSD` nodes (Flex). The blast-radius profile is also different — one All-RAM node is ~8% of the cluster vs ~3% for one Flex node.
 
 If only one option can be tested, run **All-RAM first** — it's the lower-risk path against the 10 ms SLA, and the latency floor it establishes is the reference number Flex has to come close to.
 
@@ -230,7 +260,7 @@ These are the assumptions that drive the topology. Confirm with the deploying te
 5. **Rack/zone awareness**: confirm the deployment region and zones. The Terraform module supports rack-zone awareness; default to a 3-zone topology in the chosen region.
 6. **Single-call shape**: the workload requirements call for a strong preference toward a single Redis call per bid request. The prototype's `hybrid_bitmap_taxonomy` mode is 4–5 ops via Lua + pipelining. A true single-call shape would compose all five steps into one Lua script or Redis Function; feasible but a separate prototype task. Decide whether the scale test exercises the current 4-op path or a consolidated 1-op path.
 7. **Float-threshold filter complexity bound**: the prototype generator caps filters at 4 atoms; production may have more. Settle the bound before generating synthetic data at 500 M scale.
-8. **Hardware path — All-RAM vs Redis Flex**: see §1.6–1.9. Flex needs roughly half the node count at the throughput-sized provisioning, or about an eighth at the capacity-sized provisioning, to host the same dataset; the question for the 10 ms p99 budget is whether the SSD-backed read tail on a cold-key-dominated workload stays inside the budget. Recommendation is to measure both side-by-side at the 1 M bid/s scenario before committing. Confirm that local-NVMe-attached node shapes (`n2-highmem-64` with 16 × 375 GB local SSD, or `c3-standard-176-lssd`, or `z3-highmem-88` if available in the chosen region) are acceptable to procurement — local SSDs are ephemeral on GCP, so cluster-wide replication and persistence settings have to compensate.
+8. **Hardware path — All-RAM vs Redis Flex**: see §1.6–1.9. Once the All-RAM cluster moves to high-RAM `m2-ultramem-208` nodes, the node-count comparison changes shape: All-RAM is ~12 nodes, Flex throughput-sized is ~36 nodes, Flex capacity-sized is ~9 nodes. The All-RAM and Flex-capacity options end up at similar node counts; the meaningful distinction between them is **per-node blast radius** (~8% vs ~12% of cluster on single-node loss) and **bid p99 risk** (RAM-only is comfortable inside the 10 ms budget; Flex needs measurement against the SSD-read tail). Recommendation is to measure both side-by-side at the 1 M bid/s scenario before committing. Confirm that the chosen Redis Enterprise node shapes (high-memory M2/M3 for All-RAM; local-NVMe-attached `n2-highmem-64`, `c3-standard-176-lssd`, or `z3-highmem-88` for Flex if available in the chosen region) are acceptable to procurement — local SSDs are ephemeral on GCP, so cluster-wide replication and persistence settings have to compensate.
 9. **Identity → MAID resolution**: see §1.2. Choose between (A) deriving `maid_id` deterministically from the canonical identity hash so no Redis-side reverse index is needed, or (B) keeping `maid_id` opaque and storing a 500 M-entry reverse index. (A) saves a Redis round trip on every bid request and eliminates ~45 GB of index storage; (B) preserves whatever semantics the existing `maid_id` allocation carries.
 
 ---
@@ -252,8 +282,8 @@ module "redis_enterprise" {
   zones      = var.gcp_zones
 
   cluster_name      = "dsp-bench-ram"
-  node_count        = 75
-  machine_type      = "n2-highmem-64"
+  node_count        = 12
+  machine_type      = "m2-ultramem-208"
   data_disk_size_gb = 1024
   data_disk_type    = "pd-ssd"
 
