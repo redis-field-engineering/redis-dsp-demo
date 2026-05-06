@@ -17,6 +17,37 @@ The goal is to compare quality and latency tradeoffs using plain Redis primitive
 
 For the current retrieval comparison and measured latency results, see [reports/benchmark_report.md](reports/benchmark_report.md).
 
+## MAID Scores vs Segments
+
+One important modeling choice in this demo is that the synthetic MAID profile carries both:
+
+- raw float interest scores, such as `travel = 0.82`
+- derived segment labels, such as `travel_high`
+
+The segment labels are produced by simple bucketing of the MAID's float scores:
+
+- score `>= 0.70` -> `feature_high`
+- score `>= 0.45` and `< 0.70` -> `feature_medium`
+- score `< 0.45` -> no segment
+
+Those derived segments are then sorted by score, and the top few become the MAID's retrieval segments. For example:
+
+- `travel = 0.82` -> `travel_high`
+- `finance = 0.74` -> `finance_high`
+- `tech = 0.58` -> `tech_medium`
+
+This distinction matters because most of the fast retrieval strategies use the bucketed segments to narrow the candidate set, rather than comparing raw float values for every ad on the hot path.
+
+- `maid_bruteforce_sinter` and `maid_tightened_sinter` use the strongest MAID segments as Redis `SINTER` keys
+- `precomputed_segment` and `hybrid_bitmap_gating` depend on batch-time candidate lists that were built from bucketed segment targeting
+- `hybrid_precompute_plus_realtime` and `hybrid_bitmap_taxonomy` still use those coarse segment-driven candidate sets first, but then apply the per-ad `taxonomy_filter` against the MAID's raw float scores before final ranking
+- `full_realtime` is the only mode that skips the coarse retrieval shortcut and evaluates the full campaign universe directly against the MAID's live data
+
+That is the core tradeoff in the demo:
+
+- bucketed segments are cheap and Redis-friendly, but lossy
+- raw float-score evaluation is more expressive, but more expensive unless it is pushed late in the request path
+
 ## Core Story
 
 The synthetic benchmark compares seven execution styles over the same MAID and campaign dataset:
