@@ -417,12 +417,23 @@ python3 -m experiments.benchmark \
 
 ## Notebooks
 
-The main walkthrough sequence is now:
+The notebook sequence is a **runnable demo** that walks the bid path from naive to fast. Run them in order against a local docker-compose Redis. Each notebook executes real Redis commands — no simulation — so the timings and key contents are live.
 
-- [01_synthetic_data.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/01_synthetic_data.ipynb)
-- [02_redis_key_schema.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/02_redis_key_schema.ipynb)
-- [03_ranking_evaluation.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/03_ranking_evaluation.ipynb)
-- [06_boolean_targeting_walkthrough.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/06_boolean_targeting_walkthrough.ipynb)
-- [07_hybrid_mode_comparison.ipynb](/Users/jeremy.plichta/work/mastercard-dsp/notebooks/07_hybrid_mode_comparison.ipynb)
+Setup once:
 
-`MIND` and `FairJob` remain useful secondary comparisons, but the main demo story is now the synthetic identity-driven benchmark and the hybrid retrieval mode.
+```bash
+make up
+python3 -m data.load_redis --redis-url redis://localhost:6381/0 \
+  --dataset-dir data/generated/synthetic
+```
+
+Then open the notebooks in order:
+
+1. [01_bid_request_and_data.ipynb](notebooks/01_bid_request_and_data.ipynb) — the workload: one bid request, one MAID profile, one ad cache. What Redis is holding.
+2. [02_full_realtime_baseline.ipynb](notebooks/02_full_realtime_baseline.ipynb) — the naive path: fetch every campaign, filter in app. The number every other mode beats.
+3. [03_sinter_tightening.ipynb](notebooks/03_sinter_tightening.ipynb) — inverted indexes, the bruteforce 26-probe plan vs the tightened 3-probe pipelined plan.
+4. [04_precomputed_candidates.ipynb](notebooks/04_precomputed_candidates.ipynb) — the central pattern: per-MAID `aud:` STRING built offline, bid path collapses to one `GET`.
+5. [05_bitmap_gate_lua.ipynb](notebooks/05_bitmap_gate_lua.ipynb) — server-side gating: the actual Lua script that joins `aud:` against `bm:servable` in one round trip.
+6. [06_taxonomy_filter_and_comparison.ipynb](notebooks/06_taxonomy_filter_and_comparison.ipynb) — app-side AND/OR/NOT on float interest scores, plus the headline mode comparison.
+
+Two appendix notebooks cover related but off-path material — public-dataset adapters and segment-bucket boolean targeting — under [notebooks/appendix/](notebooks/appendix/).
