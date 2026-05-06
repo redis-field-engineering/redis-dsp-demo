@@ -55,6 +55,7 @@ The synthetic benchmark compares seven execution styles over the same MAID and c
 1. `full_realtime`
    - fetch the MAID
    - evaluate the full campaign universe live, including the per-campaign `taxonomy_filter`
+   - correctness baseline, not the preferred low-latency path
 2. `maid_bruteforce_sinter`
    - resolve the MAID
    - run the original `26`-probe `SINTER` plan
@@ -81,23 +82,6 @@ The synthetic benchmark compares seven execution styles over the same MAID and c
    - additionally evaluates each ad's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking
 
 This makes the latency and recall tradeoffs measurable instead of theoretical, and surfaces the cost of skipping the per-ad `taxonomy_filter` rather than burying it.
-
-## Methods At A Glance
-
-- `full_realtime`
-  - full live evaluation over the campaign universe; correctness baseline, not the preferred low-latency path
-- `maid_bruteforce_sinter`
-  - legacy MAID retrieval using `26` sequential `SINTER` probes (one Redis round trip each)
-- `maid_tightened_sinter`
-  - reduced MAID retrieval using `3` pipelined `SINTER` probes (one Redis round trip total)
-- `precomputed_segment`
-  - direct per-MAID candidate list plus minimal live gating; does not evaluate `taxonomy_filter`
-- `hybrid_precompute_plus_realtime`
-  - direct per-MAID candidate list plus full live gating, including `taxonomy_filter`
-- `hybrid_bitmap_gating`
-  - direct per-MAID candidate list plus server-side bitmap eligibility gate and live `fcap` check; does not evaluate `taxonomy_filter`
-- `hybrid_bitmap_taxonomy`
-  - same path as `hybrid_bitmap_gating` plus app-side `taxonomy_filter` evaluation against the MAID's float interest scores
 
 The benchmark report has the detailed method definitions, round trips, and p50/p99 comparisons:
 - [reports/benchmark_report.md](reports/benchmark_report.md)
