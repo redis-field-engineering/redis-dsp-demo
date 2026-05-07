@@ -417,17 +417,31 @@ python3 -m experiments.benchmark \
 
 ## Notebooks
 
-The notebook sequence is a **runnable demo** that walks the bid path from naive to fast. Run them in order against a local docker-compose Redis. Each notebook executes real Redis commands — no simulation — so the timings and key contents are live.
+The notebook sequence is a **runnable demo** that walks the bid path from naive to fast. Each notebook executes real Redis commands against a live cluster — no simulation — so the timings and key contents are live.
 
-Setup once:
+**Run in Colab** (zero local setup): each notebook has an *Open in Colab* badge at the top. The setup cells clone the repo, install dependencies, start a Redis Stack server, and load the synthetic dataset. First run takes ~60–90 seconds; everything after that is near-instant.
+
+| Notebook | Open in Colab |
+| --- | --- |
+| 01 · Bid request and data shape | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/01_bid_request_and_data.ipynb) |
+| 02 · `full_realtime` baseline | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/02_full_realtime_baseline.ipynb) |
+| 03 · SINTER tightening | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/03_sinter_tightening.ipynb) |
+| 04 · Precomputed candidates | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/04_precomputed_candidates.ipynb) |
+| 05 · Bitmap gate Lua script | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/05_bitmap_gate_lua.ipynb) |
+| 06 · Taxonomy filter + headline comparison | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/redis-field-engineering/redis-dsp-demo/blob/main/notebooks/06_taxonomy_filter_and_comparison.ipynb) |
+
+**Run locally** against the docker-compose stack:
 
 ```bash
 make up
 python3 -m data.load_redis --redis-url redis://localhost:6381/0 \
   --dataset-dir data/generated/synthetic
+jupyter lab notebooks/
 ```
 
-Then open the notebooks in order:
+The notebook setup cells auto-detect a local environment and skip the Colab-specific steps.
+
+What each notebook demonstrates:
 
 1. [01_bid_request_and_data.ipynb](notebooks/01_bid_request_and_data.ipynb) — the workload: one bid request, one MAID profile, one ad cache. What Redis is holding.
 2. [02_full_realtime_baseline.ipynb](notebooks/02_full_realtime_baseline.ipynb) — the naive path: fetch every campaign, filter in app. The number every other mode beats.
