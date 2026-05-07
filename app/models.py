@@ -28,7 +28,7 @@ class UserProfile(BaseModel):
     user_id: str
     geo: str
     device: str
-    age_bucket: str
+    age_bucket: str = ""
     interests: dict[str, float]
     segments: list[str]
     identity_tokens: list[str] = Field(default_factory=list)
@@ -41,6 +41,9 @@ class UserProfile(BaseModel):
     impression_count: int = 0
 
     def to_redis_hash(self) -> dict[str, str]:
+        # Keep the MAID hash limited to serving-time fields. Identity-token fanout
+        # lives in `identity:*`, frequency state lives in `fcap:*`, and age bucket
+        # is synthetic-only metadata not used on the hot path.
         return {
             "user_id": self.user_id,
             "geo": self.geo,
@@ -48,13 +51,10 @@ class UserProfile(BaseModel):
             "postal_code": self.postal_code,
             "device": self.device,
             "device_type": self.device_type,
-            "age_bucket": self.age_bucket,
             "card_tier": self.card_tier,
             "spend_tier": self.spend_tier,
             "interests_json": json.dumps(self.interests, sort_keys=True),
             "segments_json": json.dumps(self.segments),
-            "identity_tokens_json": json.dumps(self.identity_tokens),
-            "frequency_history_json": json.dumps(self.frequency_history, sort_keys=True),
             "impression_count": str(self.impression_count),
         }
 
@@ -67,7 +67,7 @@ class UserProfile(BaseModel):
             postal_code=str(values.get("postal_code", "")),
             device=str(values["device"]),
             device_type=str(values.get("device_type", "mobile")),
-            age_bucket=str(values["age_bucket"]),
+            age_bucket=str(values.get("age_bucket", "")),
             card_tier=str(values.get("card_tier", "Standard")),
             spend_tier=str(values.get("spend_tier", "medium")),
             interests=json.loads(values["interests_json"]),

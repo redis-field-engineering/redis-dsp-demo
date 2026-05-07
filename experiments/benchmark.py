@@ -14,6 +14,7 @@ from app.models import (
     MAID_TIGHTENED_SINTER_MODE,
     PRECOMPUTED_SEGMENT_MODE,
 )
+from data.size_estimates import human_bytes, method_keyspace_bytes
 from experiments.evaluate import evaluate_synthetic_modes
 from loadtest.run import run_load_test
 from data.common import read_jsonl
@@ -22,6 +23,7 @@ from data.common import read_jsonl
 def build_report(
     synthetic_mode_results: dict[str, object],
     loadtest_results: dict[str, dict[str, float | int]],
+    method_sizes: dict[str, object],
 ) -> str:
     modes = synthetic_mode_results["modes"]
     retrieval_overview_rows = [
@@ -75,13 +77,15 @@ def build_report(
         "- **Sampling:** the load driver picks a hot 20% of MAIDs on 70% of requests and a cold 80% of MAIDs on 30%, so cache locality is intentionally favorable.",
         "- **Concurrency:** these numbers measure the serial latency floor of each path. They do **not** measure behavior under realistic concurrent bid traffic. A concurrent load test against the same cluster shape is out of scope for this report and is called out in the GCP scaling spec.",
         "- **Redis cache:** the FastAPI service runs with `cache_campaigns_in_memory=False` so every campaign-metadata fetch goes through Redis. The avg / p99 numbers therefore include the actual round-trip cost of reading campaign hashes from `redis-server`.",
+        "- **Data-size columns:** `Small Test Data` is the logical payload size of the current 4K-MAID / 2.5K-campaign synthetic dataset for that method's required keyspaces. `Scaled-Up Data` is the corresponding logical footprint at 500 M MAIDs / 5 K active ads, using the assumptions in `reports/full_scale_gcp_test_spec.md`.",
         "",
-        "| Mode | Retrieval Shape | Avg SINTER Ops | Avg Total Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+        "| Mode | Retrieval Shape | Small Test Data | Scaled-Up Data | Avg SINTER Ops | Avg Total Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for mode_name, retrieval_shape, stats in retrieval_overview_rows:
+        footprint = method_sizes[mode_name]
         overview_table.append(
-            f"| `{mode_name}` | {retrieval_shape} | {stats['avg_sinter_ops']} | {stats['avg_redis_round_trips']} | {stats['decision_path_p50_latency_ms']} | {stats['decision_path_p99_latency_ms']} |"
+            f"| `{mode_name}` | {retrieval_shape} | {human_bytes(footprint.small_scale_bytes)} | {human_bytes(footprint.scaled_up_bytes)} | {stats['avg_sinter_ops']} | {stats['avg_redis_round_trips']} | {stats['decision_path_p50_latency_ms']} | {stats['decision_path_p99_latency_ms']} |"
         )
     method_definitions = [
         "## Method Definitions",
@@ -239,6 +243,7 @@ def main() -> None:
     args = parser.parse_args()
 
     synthetic_modes = evaluate_synthetic_modes(args.dataset_dir)
+    method_sizes = method_keyspace_bytes(args.dataset_dir)
     user_path = args.dataset_dir / "maids.jsonl"
     if not user_path.exists():
         user_path = args.dataset_dir / "users.jsonl"
@@ -274,8 +279,23 @@ def main() -> None:
         )
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(build_report(synthetic_modes, loadtests), encoding="utf-8")
-    print(json.dumps({"synthetic_modes": synthetic_modes, "loadtests": loadtests}, indent=2))
+    args.output.write_text(build_report(synthetic_modes, loadtests, method_sizes), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "synthetic_modes": synthetic_modes,
+                "loadtests": loadtests,
+                "method_sizes": {
+                    mode_name: {
+                        "small_scale_bytes": footprint.small_scale_bytes,
+                        "scaled_up_bytes": footprint.scaled_up_bytes,
+                    }
+                    for mode_name, footprint in method_sizes.items()
+                },
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
