@@ -14,14 +14,14 @@ These numbers are estimates derived from the workload requirements. They are the
 
 ### 1.1 Serving objects and per-keyspace assumptions
 
-The benchmarked methods do **not** all store the same MAID object. That, plus the per-MAID audience precompute, are the two storage decisions that move the totals in §1.2.
+There is **one** `maid:{maid_id}` keyspace, but the per-MAID hash size differs depending on which serving mode is deployed. That mode-dependent shape is the single biggest factor in §1.2's per-method totals; the per-MAID audience precompute is a close second.
 
 The Redis-side serving objects are:
 
 | Object | Used by | Contents | Working assumption |
 | --- | --- | --- | --- |
-| `maid:{maid_id}` | `full_realtime`, `maid_*_sinter` | geo, state, postal, device type, device OS, card tier, spend tier, float taxonomy scores, derived segments | **~11 KB / MAID → ~5.12 TB** |
-| `maid_hot:{maid_id}` | `precomputed_segment`, `hybrid_*` | compact scoring profile: float taxonomy scores + impression count | **~9 KB / MAID → ~4.19 TB** |
+| `maid:{maid_id}` (full-mode shape) | `full_realtime`, `maid_*_sinter` | all 11 serving fields: `user_id`, `geo`, `state`, `postal_code`, `device`, `device_type`, `card_tier`, `spend_tier`, `segments_json`, `interests_json`, `impression_count` | **~11 KB / MAID → ~5.12 TB** |
+| `maid:{maid_id}` (lean-mode shape) | `precomputed_segment`, `hybrid_*` | scoring subset only: `user_id`, `interests_json`, `impression_count`. Static-targeting fields (geo / state / device / segments / etc.) are not present because static targeting was already evaluated offline by the precompute that produced `aud:{maid_id}` | **~9 KB / MAID → ~4.19 TB** |
 | `identity:{identity_token}` | all current benchmarked modes | canonical identity → MAID lookup | **~45 GB total** at 500 M MAIDs |
 | `aud:{maid_id}` | precomputed / hybrid modes | precomputed candidate campaign IDs | **~1 TB total** (see §1.1.A) |
 | `fcap:{maid_id}` | all modes except pure offline ranking | per-MAID frequency counters | **~50 GB at 100 K bid/s** (see §1.1.B); scales with bid rate |
@@ -30,9 +30,20 @@ The Redis-side serving objects are:
 | `idx:*` sets | `maid_*_sinter` | geo / state / device / segment indexes | **~8 MB total** (~150 K total set members across all dimensions; negligible at TB scale) |
 | `bm:*` bitmaps | `hybrid_bitmap_*` | active / pacing / budget / servable bitmaps | **~8 MB total** |
 
-Two details that affect every method below:
+#### 1.1.0 Why one `maid:` keyspace, not two
 
-1. The MAID profile has been slimmed down. Publisher-specific identity arrays are **not** stored on the serving MAID object, age-bucket metadata is not stored, and frequency history lives in `fcap:{maid_id}` rather than inside the MAID hash.
+The bid path's hybrid modes only need `user_id`, `interests_json`, and `impression_count` from the MAID. An earlier prototype kept those three fields in a separate `maid_hot:{maid_id}` hash so the bid path could read a smaller key. That split was wasteful at production scale: `interests_json` (~9 KB) was duplicated across both keys, costing ~4 TB of redundant storage at 500 M MAIDs.
+
+The current design keeps **one** `maid:{maid_id}` hash whose field set is chosen at deployment time:
+
+- If the production cluster runs `full_realtime` or any `maid_*_sinter` mode (which need static targeting fields online), the hash carries all 11 fields → **~11 KB / MAID, ~5.12 TB total**.
+- If the production cluster runs only the precomputed / hybrid modes, the hash can be slimmed to the 3 scoring fields the bid path actually reads → **~9 KB / MAID, ~4.19 TB total**.
+
+Either way, the bid path's `HMGET maid:<id> user_id interests_json impression_count` is the same — only the underlying key size differs. The benchmark code reads the hot subset via `HMGET` so wire cost on the bid path is mode-independent.
+
+Two additional details that affect every method below:
+
+1. The MAID profile has been slimmed down beyond the original draft. Publisher-specific identity arrays are **not** stored on the serving MAID object, age-bucket metadata is not stored, and frequency history lives in `fcap:{maid_id}` rather than inside the MAID hash.
 2. The current benchmark implementation uses a separate `identity:{identity_token}` keyspace for every mode. If a future version derives `maid_id` directly from the canonical identity token, subtract ~45 GB and one Redis read from every method below.
 
 #### 1.1.A Audience precompute fanout
@@ -73,25 +84,27 @@ At ≤ 100 K bid/s the listpack representation keeps each `fcap:` very compact (
 
 ### 1.2 Method-specific logical totals at 500 M MAIDs / 5 K ads
 
-Computed by `data/size_estimates.py` using the §1.1 per-keyspace assumptions. Numbers are at the **100 K bid/s** tier; see §1.4 for how `fcap:` shifts at 20 K and 1 M.
+Computed by `data/size_estimates.py` using the §1.1 per-keyspace assumptions. Numbers are at the **100 K bid/s** tier; see §1.4 for how `fcap:` shifts at 20 K and 1 M. The `maid:` column reflects which mode-dependent shape that method needs (per §1.1).
 
-| Method | Required keyspaces | Logical total |
-| --- | --- | ---: |
-| `full_realtime` | `identity:` + full `maid:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.22 TB** |
-| `maid_bruteforce_sinter` | `identity:` + full `maid:` + `campaign:` + `campaign_state:` + `fcap:` + `idx:*` | **~5.22 TB** |
-| `maid_tightened_sinter` | `identity:` + full `maid:` + `campaign:` + `campaign_state:` + `fcap:` + `idx:*` | **~5.22 TB** |
-| `precomputed_segment` | `identity:` + `maid_hot:` + `aud:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.28 TB** |
-| `hybrid_precompute_plus_realtime` | `identity:` + `maid_hot:` + `aud:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.28 TB** |
-| `hybrid_bitmap_gating` | `identity:` + `maid_hot:` + `aud:` + `campaign:` + `fcap:` + `bm:*` | **~5.28 TB** |
-| `hybrid_bitmap_taxonomy` | `identity:` + `maid_hot:` + `aud:` + `campaign:` + `fcap:` + `bm:*` | **~5.28 TB** |
+| Method | `maid:` shape | Required keyspaces | Logical total |
+| --- | --- | --- | ---: |
+| `full_realtime` | full (~11 KB) | `identity:` + `maid:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.22 TB** |
+| `maid_bruteforce_sinter` | full (~11 KB) | `identity:` + `maid:` + `campaign:` + `campaign_state:` + `fcap:` + `idx:*` | **~5.22 TB** |
+| `maid_tightened_sinter` | full (~11 KB) | `identity:` + `maid:` + `campaign:` + `campaign_state:` + `fcap:` + `idx:*` | **~5.22 TB** |
+| `precomputed_segment` | lean (~9 KB) | `identity:` + `maid:` + `aud:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.28 TB** |
+| `hybrid_precompute_plus_realtime` | lean (~9 KB) | `identity:` + `maid:` + `aud:` + `campaign:` + `campaign_state:` + `fcap:` | **~5.28 TB** |
+| `hybrid_bitmap_gating` | lean (~9 KB) | `identity:` + `maid:` + `aud:` + `campaign:` + `fcap:` + `bm:*` | **~5.28 TB** |
+| `hybrid_bitmap_taxonomy` | lean (~9 KB) | `identity:` + `maid:` + `aud:` + `campaign:` + `fcap:` + `bm:*` | **~5.28 TB** |
 
-**Notable: at production scale, the storage difference between methods is small (~60 GB).** The `maid → maid_hot` saving (~1 TB) is roughly offset by the `aud:` precompute (~1 TB), so the discriminator between methods is no longer storage — it is bid-time CPU and Redis round-trip count. The whole spec sizes around the heavier of the two paths (`hybrid_*` at ~5.28 TB) so either method's worth of data fits in the same cluster.
+**Notable: at production scale, the storage difference between methods is small (~60 GB).** The lean-mode `maid:` saving (~1 TB) is roughly offset by the `aud:` precompute (~1 TB), so the discriminator between methods is no longer storage — it is bid-time CPU and Redis round-trip count. The whole spec sizes around the heavier of the two paths (`hybrid_*` at ~5.28 TB) so either method's worth of data fits in the same cluster.
 
 The set-index footprint (`idx:*` ~8 MB) is genuinely negligible at this scale — the SINTER methods do not pay a meaningful storage premium over `full_realtime`.
 
+Production deployments only run **one** mode at a time, so the cluster only stores **one** `maid:` shape in practice. The 5.22 vs 5.28 TB split is the real choice the customer makes: pick the mode, pick the shape, size the cluster.
+
 ### 1.3 Headroom target for the production candidate
 
-The rest of this spec sizes the cluster for **`hybrid_bitmap_taxonomy`**, because that is the repo's current production-shaped low-latency path: it uses the smaller `maid_hot` object, precomputed audience lists, bitmap gating, live `fcap`, and still enforces the per-ad float-score `taxonomy_filter`.
+The rest of this spec sizes the cluster for **`hybrid_bitmap_taxonomy`**, because that is the repo's current production-shaped low-latency path: it uses the lean `maid:` shape, precomputed audience lists, bitmap gating, live `fcap`, and still enforces the per-ad float-score `taxonomy_filter`.
 
 For that method, at the 100 K bid/s tier:
 
@@ -105,7 +118,7 @@ This is the working footprint used by §1.6 shard sizing and §3.2 `redisctl` co
 
 ### 1.4 Bid-rate tier sizing
 
-Most of the working footprint is *bid-rate-independent*: `maid_hot:`, `aud:`, `campaign:`, `identity:`, and the bitmaps don't grow when traffic increases. Only `fcap:` scales with bid rate (per §1.1.B). The table below shows what changes per tier and what doesn't.
+Most of the working footprint is *bid-rate-independent*: `maid:`, `aud:`, `campaign:`, `identity:`, and the bitmaps don't grow when traffic increases. Only `fcap:` scales with bid rate (per §1.1.B). The table below shows what changes per tier and what doesn't.
 
 | Tier | Bid rate | Read ops/s | Write ops/s | `fcap:` size | Logical total | × 2 replicas, +25 % headroom |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -122,7 +135,7 @@ Shards / nodes per tier are laid out in §1.6 – §1.9.
 Per bid request, the prototype's `hybrid_bitmap_taxonomy` mode performs:
 
 1. `GET identity:<identity_token>` — resolve MAID **(skipped if the bid stack derives `maid_id` directly from the canonical identity token in app memory)**
-2. `HMGET maid_hot:<maid_id> ...` — scoring profile
+2. `HMGET maid:<maid_id> user_id interests_json impression_count` — scoring subset of the unified `maid:` hash
 3. Lua bitmap script over `aud:<maid_id>` and `bm:servable` — gated candidate list
 4. Pipelined `HGETALL campaign:<id>` for surviving candidates — campaign metadata
 5. `HMGET fcap:<maid_id> <campaign_ids>` — frequency counters
@@ -285,12 +298,12 @@ The 1 M tier is roughly 2× the cluster of the 20 K – 100 K tier at 20 % RAM. 
 
 #### 1.8.A Latency consideration for Flex
 
-The bid path is ~3–4 random reads across very large keyspaces (`maid_hot:`, `aud:`, `fcap:`, plus `identity:` if the explicit lookup is retained). Each MAID is touched infrequently, so the hot-set hit rate for those reads is **low by construction** — a meaningful fraction of reads will be served from SSD rather than RAM. Local-NVMe reads are roughly an order of magnitude slower than RAM reads at the median, and tail behavior under load is harder to bound. Indicative impact on the bid path:
+The bid path is ~3–4 random reads across very large keyspaces (`maid:`, `aud:`, `fcap:`, plus `identity:` if the explicit lookup is retained). Each MAID is touched infrequently, so the hot-set hit rate for those reads is **low by construction** — a meaningful fraction of reads will be served from SSD rather than RAM. Local-NVMe reads are roughly an order of magnitude slower than RAM reads at the median, and tail behavior under load is harder to bound. Indicative impact on the bid path:
 
 | Bid step | All-RAM cost | Flex cost (cache miss) |
 | --- | --- | --- |
 | `GET identity:<identity_token>` (Option B only) | <0.5 ms | ~0.5–2 ms |
-| `HMGET maid_hot:<id> ...` | <0.5 ms | ~0.5–2 ms |
+| `HMGET maid:<id> user_id interests_json impression_count` | <0.5 ms | ~0.5–2 ms |
 | Lua bitmap on `aud:<id>` | <0.5 ms | ~0.5–2 ms |
 | pipelined `HGETALL campaign:<id>` (5 K ads, hot in RAM) | <1 ms | <1 ms (will stay in RAM) |
 | `HMGET fcap:<id>` | <0.5 ms | ~0.5–2 ms |
@@ -542,7 +555,7 @@ Pipeline shape per writer VM:
 ```text
 generate batch of 100K users
 build pipeline of:
-  - HSET maid_hot:<id> ...
+  - (no separate maid_hot: hash any more — bid path reads scoring fields straight from maid: via HMGET)
   - SET identity:<identity_token> <maid_id>  (1× per user in the current benchmark implementation)
   - SET aud:<maid_id> <json>
   - HSET fcap:<maid_id> ...   (only for users with non-empty counters)

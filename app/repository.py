@@ -68,27 +68,28 @@ class RedisRepository:
         return UserProfile.from_redis_hash(payload), 1
 
     def fetch_scoring_profile(self, user_id: str) -> tuple[ScoringProfile | None, int]:
+        # Hybrid / precomputed modes only need the scoring fields; HMGET pulls
+        # them directly out of the unified `maid:` hash so the wire cost stays
+        # at ~9 KB regardless of what other fields the hash holds for other
+        # serving modes.
         payload = self.client.hmget(
-            f"maid_hot:{user_id}",
+            f"maid:{user_id}",
             "user_id",
             "interests_json",
             "impression_count",
         )
-        if payload[0] is not None:
-            return (
-                ScoringProfile.from_redis_hash(
-                    {
-                        "user_id": payload[0],
-                        "interests_json": payload[1] or "{}",
-                        "impression_count": payload[2] or "0",
-                    }
-                ),
-                1,
-            )
-        user, round_trips = self.fetch_user(user_id)
-        if user is None:
-            return None, round_trips
-        return ScoringProfile.from_user_profile(user), round_trips
+        if payload[0] is None:
+            return None, 1
+        return (
+            ScoringProfile.from_redis_hash(
+                {
+                    "user_id": payload[0],
+                    "interests_json": payload[1] or "{}",
+                    "impression_count": payload[2] or "0",
+                }
+            ),
+            1,
+        )
 
     def resolve_identity(self, identity_token: str) -> tuple[str | None, int]:
         maid_id = self.client.get(f"identity:{identity_token}")

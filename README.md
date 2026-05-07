@@ -155,8 +155,7 @@ For compatibility with older utilities, the generator also writes `users.jsonl`.
 The demo intentionally relies on a narrow Redis feature set:
 
 - `HASH`
-  - `maid:<id>`
-  - `maid_hot:<id>`
+  - `maid:<id>` (single per-MAID hash; the bid path's hybrid modes `HMGET` only the scoring subset — `user_id`, `interests_json`, `impression_count`)
   - `campaign:<id>`
   - `campaign_state:<id>`
   - `fcap:{maid_id} -> {campaign_id: delivery_count}`
@@ -217,11 +216,11 @@ That lets the hybrid mode push the expensive static matching into batch while st
 At request time, the hybrid mode does:
 
 1. `GET identity:<token>` to resolve the incoming identifier into a `maid_id`
-2. `HMGET maid_hot:<id> user_id interests_json impression_count` to fetch only the scoring signals needed online
+2. `HMGET maid:<id> user_id interests_json impression_count` to fetch only the scoring signals needed online
 3. `GET aud:<maid_id>` for the precomputed candidate campaign list
 4. server-side bitmap gating against `bm:servable`
 5. campaign metadata fetch plus `HMGET fcap:{maid_id} <campaign_ids...>`
-6. exact frequency-cap check and in-memory reranking with the `maid_hot` signals
+6. exact frequency-cap check and in-memory reranking with the scoring signals from the `maid:` HMGET
 
 `shadow_modes` are supported on the request so the hybrid path can be compared live against `full_realtime` and `precomputed_segment` without changing the returned mode.
 
@@ -319,7 +318,7 @@ With direct per-MAID candidate lists, the main tradeoff changes:
 - `hybrid_precompute_plus_realtime` preserves the same ranking output as `full_realtime` on the synthetic dataset while cutting the candidate set from `2500` ads to about `30`
 - `precomputed_segment` and `hybrid_bitmap_gating` are faster, but both intentionally skip `taxonomy_filter` and lose ranking quality as a result
 - `hybrid_bitmap_taxonomy` is the best low-latency path that still enforces the per-ad float-score `taxonomy_filter`, and on the native VM it stays under the `< 10 ms` decision-path p99 target
-- on a native VM, identity resolution, `maid_hot` fetch, candidate lookup, and campaign fetch all fall into sub-millisecond or low-single-digit-millisecond behavior instead of the noisier local-container tails
+- on a native VM, identity resolution, `maid:` HMGET, candidate lookup, and campaign fetch all fall into sub-millisecond or low-single-digit-millisecond behavior instead of the noisier local-container tails
 
 ## Reproducing The VM Benchmark
 

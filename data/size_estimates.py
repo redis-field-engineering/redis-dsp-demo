@@ -14,7 +14,6 @@ from app.models import (
     MAID_TIGHTENED_SINTER_MODE,
     PRECOMPUTED_SEGMENT_MODE,
     Campaign,
-    ScoringProfile,
     UserProfile,
 )
 from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES, read_jsonl
@@ -22,8 +21,26 @@ from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES, rea
 
 @dataclass(frozen=True)
 class KeyspaceBytes:
-    maid_full: int
-    maid_hot: int
+    """Per-keyspace logical bytes.
+
+    Note: the `maid:` keyspace has *two* sizes, depending on which serving mode
+    is deployed in production. There is only one `maid:` keyspace at any time;
+    its per-key field set is what differs.
+
+    - `maid_full_mode`: bytes when the cluster runs `full_realtime` or any
+      `maid_*_sinter` mode. The hash carries all 11 serving fields:
+      `user_id`, `geo`, `state`, `postal_code`, `device`, `device_type`,
+      `card_tier`, `spend_tier`, `segments_json`, `interests_json`,
+      `impression_count`.
+    - `maid_lean_mode`: bytes when the cluster runs only the precomputed /
+      hybrid modes. The hash carries the scoring subset:
+      `user_id`, `interests_json`, `impression_count`. Static targeting
+      fields are not present because static targeting was already evaluated
+      offline by the precompute job that produced `aud:{maid_id}`.
+    """
+
+    maid_full_mode: int
+    maid_lean_mode: int
     identity: int
     audience: int
     campaign: int
@@ -57,9 +74,13 @@ class MethodFootprint:
 #     The constant below corresponds to the 100 K bid/s tier (~9 entries /
 #     MAID at peak end-of-day, before the daily reset at midnight UTC).
 #     Scales linearly with bid rate; see §1.4 for the per-tier table.
+#
+# `maid_full_mode` carries all 11 serving fields (~11 KB / MAID).
+# `maid_lean_mode` carries only the 3 scoring fields the bid path reads via
+# HMGET (~9 KB / MAID, dominated by interests_json at 500 taxonomy labels).
 SCALED_UP_KEYSPACES = KeyspaceBytes(
-    maid_full=int(500_000_000 * 11 * 1024),  # slimmed MAID hash; mostly interests_json at ~500 taxonomy labels
-    maid_hot=int(500_000_000 * 9 * 1024),  # scoring-only profile used by the precomputed / hybrid paths
+    maid_full_mode=int(500_000_000 * 11 * 1024),  # full_realtime / sinter modes need all 11 fields
+    maid_lean_mode=int(500_000_000 * 9 * 1024),   # hybrid / precomputed modes only need scoring fields
     identity=45 * 1024**3,  # one canonical identity->MAID entry per MAID at ~90 B/entry
     audience=1024 * 1024**3,  # precomputed aud:{maid} lists, ~1.9 KB / MAID at cap=200
     campaign=256 * 1024**2,  # 5K ads with targeting + ranking metadata
@@ -71,13 +92,19 @@ SCALED_UP_KEYSPACES = KeyspaceBytes(
 )
 
 
+# Field sets for the two `maid:` shapes. Used by both the per-method totals
+# and by `_measure_current_keyspaces` so the small-scale and scaled-up numbers
+# agree on what "lean" vs "full" means.
+_LEAN_MAID_FIELDS = ("user_id", "interests_json", "impression_count")
+
+
 def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
     current = _measure_current_keyspaces(dataset_dir)
     return {
         FULL_REALTIME_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -86,7 +113,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -97,7 +124,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         MAID_BRUTEFORCE_SINTER_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -107,7 +134,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -119,7 +146,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         MAID_TIGHTENED_SINTER_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -129,7 +156,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_full=True,
+                maid_full_mode=True,
                 identity=True,
                 campaign=True,
                 campaign_state=True,
@@ -141,7 +168,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         PRECOMPUTED_SEGMENT_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -151,7 +178,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -163,7 +190,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         HYBRID_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -173,7 +200,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -185,7 +212,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         HYBRID_BITMAP_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -195,7 +222,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -207,7 +234,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
         HYBRID_BITMAP_TAXONOMY_MODE: MethodFootprint(
             small_scale_bytes=_method_total_bytes(
                 current,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -217,7 +244,7 @@ def method_keyspace_bytes(dataset_dir: Path) -> dict[str, MethodFootprint]:
             ),
             scaled_up_bytes=_method_total_bytes(
                 SCALED_UP_KEYSPACES,
-                maid_hot=True,
+                maid_lean_mode=True,
                 identity=True,
                 audience=True,
                 campaign=True,
@@ -254,11 +281,14 @@ def _measure_current_keyspaces(dataset_dir: Path) -> KeyspaceBytes:
     identity_rows = read_jsonl(dataset_dir / "identity_map.jsonl")
     audience_rows = read_jsonl(dataset_dir / "user_candidates.jsonl")
 
-    maid_full = sum(_hash_bytes(f"maid:{user.user_id}", user.to_redis_hash()) for user in users)
-    maid_hot = sum(
+    # maid: hash size when the cluster runs full_realtime / sinter modes.
+    maid_full_mode = sum(_hash_bytes(f"maid:{user.user_id}", user.to_redis_hash()) for user in users)
+    # maid: hash size when the cluster runs only hybrid / precomputed modes —
+    # the same key, but only the scoring subset of fields.
+    maid_lean_mode = sum(
         _hash_bytes(
-            f"maid_hot:{user.user_id}",
-            ScoringProfile.from_user_profile(user).to_redis_hash(),
+            f"maid:{user.user_id}",
+            {field: user.to_redis_hash()[field] for field in _LEAN_MAID_FIELDS},
         )
         for user in users
     )
@@ -303,8 +333,8 @@ def _measure_current_keyspaces(dataset_dir: Path) -> KeyspaceBytes:
         }.items()
     )
     return KeyspaceBytes(
-        maid_full=maid_full,
-        maid_hot=maid_hot,
+        maid_full_mode=maid_full_mode,
+        maid_lean_mode=maid_lean_mode,
         identity=identity,
         audience=audience,
         campaign=campaign,
@@ -319,8 +349,8 @@ def _measure_current_keyspaces(dataset_dir: Path) -> KeyspaceBytes:
 def _method_total_bytes(
     keyspaces: KeyspaceBytes,
     *,
-    maid_full: bool = False,
-    maid_hot: bool = False,
+    maid_full_mode: bool = False,
+    maid_lean_mode: bool = False,
     identity: bool = False,
     audience: bool = False,
     campaign: bool = False,
@@ -330,9 +360,14 @@ def _method_total_bytes(
     bitmaps: bool = False,
     meta: bool = False,
 ) -> int:
+    if maid_full_mode and maid_lean_mode:
+        raise ValueError(
+            "maid_full_mode and maid_lean_mode are mutually exclusive — "
+            "a method requires exactly one shape of the maid: hash"
+        )
     total = 0
-    total += keyspaces.maid_full if maid_full else 0
-    total += keyspaces.maid_hot if maid_hot else 0
+    total += keyspaces.maid_full_mode if maid_full_mode else 0
+    total += keyspaces.maid_lean_mode if maid_lean_mode else 0
     total += keyspaces.identity if identity else 0
     total += keyspaces.audience if audience else 0
     total += keyspaces.campaign if campaign else 0

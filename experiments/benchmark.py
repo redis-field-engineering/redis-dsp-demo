@@ -44,17 +44,17 @@ def build_report(
         ),
         (
             PRECOMPUTED_SEGMENT_MODE,
-            "direct aud:{maid} + maid_hot",
+            "direct aud:{maid} + maid: HMGET (scoring subset)",
             loadtest_results[PRECOMPUTED_SEGMENT_MODE],
         ),
         (
             HYBRID_MODE,
-            "direct aud:{maid} + maid_hot + live gating",
+            "direct aud:{maid} + maid: HMGET + live gating",
             loadtest_results[HYBRID_MODE],
         ),
         (
             HYBRID_BITMAP_MODE,
-            "direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check",
+            "direct aud:{maid} + maid: HMGET + bm:servable gate + live fcap hash check",
             loadtest_results[HYBRID_BITMAP_MODE],
         ),
         (
@@ -95,13 +95,13 @@ def build_report(
         f"- `{MAID_TIGHTENED_SINTER_MODE}`",
         "  Uses the reduced MAID retrieval planner. After identity resolution and full MAID fetch, it issues a compact pipelined `SINTER` plan with only three probes: one per strong segment plus a strict base fallback.",
         f"- `{PRECOMPUTED_SEGMENT_MODE}`",
-        "  Resolves the identity token, fetches a compact `maid_hot:{maid_id}` scoring profile, reads the precomputed `aud:{maid_id}` candidate list, then fetches campaign/state data plus a single per-MAID `fcap:{maid_id}` hash and reranks. It relies on batch-computed static targeting and only applies minimal live gating online.",
+        "  Resolves the identity token, HMGETs the scoring subset of `maid:{maid_id}` (user_id, interests_json, impression_count), reads the precomputed `aud:{maid_id}` candidate list, then fetches campaign/state data plus a single per-MAID `fcap:{maid_id}` hash and reranks. It relies on batch-computed static targeting and only applies minimal live gating online.",
         f"- `{HYBRID_MODE}`",
-        "  Uses the same `maid_hot:{maid_id}` and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.",
+        "  Uses the same `maid:{maid_id}` HMGET and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.",
         f"- `{HYBRID_BITMAP_MODE}`",
-        "  Uses `maid_hot:{maid_id}` and `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.",
+        "  HMGETs the scoring subset of `maid:{maid_id}` and reads `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.",
         f"- `{HYBRID_BITMAP_TAXONOMY_MODE}`",
-        "  Same retrieval and bitmap-gating path as `hybrid_bitmap_gating`, but additionally evaluates each surviving campaign's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking. This is the path that closes the gap between batch precompute and per-ad threshold-based targeting on continuous taxonomy scores.",
+        "  Same retrieval and bitmap-gating path as `hybrid_bitmap_gating` (HMGET against `maid:{maid_id}` for the scoring subset), but additionally evaluates each surviving campaign's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking. This is the path that closes the gap between batch precompute and per-ad threshold-based targeting on continuous taxonomy scores.",
         f"- `{FULL_REALTIME_MODE}`",
         "  Resolves the identity token, fetches the full MAID profile, materializes the entire campaign universe, filters everything live, and reranks the surviving set. It is the correctness baseline, not the preferred low-latency design.",
     ]

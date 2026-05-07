@@ -5,7 +5,7 @@ from pathlib import Path
 
 from redis import Redis
 
-from app.models import Campaign, ScoringProfile, UserProfile
+from app.models import Campaign, UserProfile
 from data.common import CARD_TIERS, DEVICE_OSES, DEVICE_TYPES, GEOS, STATES, read_jsonl
 
 
@@ -33,12 +33,11 @@ def load_dataset_into_redis(client: Redis, dataset_dir: Path) -> None:
     pipeline = client.pipeline(transaction=False)
     pending_commands = 0
     for user in users:
+        # Single `maid:` hash holds all serving fields. The bid path's hot
+        # modes pull only `user_id`, `interests_json`, and `impression_count`
+        # via HMGET; full-realtime / sinter modes pull the rest. There is no
+        # separate `maid_hot:` hash any more.
         pipeline.hset(f"maid:{user.user_id}", mapping=user.to_redis_hash())
-        pending_commands += 1
-        pipeline.hset(
-            f"maid_hot:{user.user_id}",
-            mapping=ScoringProfile.from_user_profile(user).to_redis_hash(),
-        )
         pending_commands += 1
         if pending_commands >= 1000:
             pipeline.execute()

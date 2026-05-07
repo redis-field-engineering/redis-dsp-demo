@@ -13,17 +13,17 @@ The metric excludes HTTP/framework overhead but includes profile fetch and reran
 - **Sampling:** the load driver picks a hot 20% of MAIDs on 70% of requests and a cold 80% of MAIDs on 30%, so cache locality is intentionally favorable.
 - **Concurrency:** these numbers measure the serial latency floor of each path. They do **not** measure behavior under realistic concurrent bid traffic. A concurrent load test against the same cluster shape is out of scope for this report and is called out in the GCP scaling spec.
 - **Redis cache:** the FastAPI service runs with `cache_campaigns_in_memory=False` so every campaign-metadata fetch goes through Redis. The avg / p99 numbers therefore include the actual round-trip cost of reading campaign hashes from `redis-server`.
-- **Data-size columns:** `Small Test Data` is the logical payload size of the current 4K-MAID / 2.5K-campaign synthetic dataset for that method's required keyspaces. `Scaled-Up Data` is the corresponding logical footprint at 500 M MAIDs / 5 K active ads at the **100 K bid/s** tier (`fcap:` is the only bid-rate-sensitive keyspace; see `reports/full_scale_gcp_test_spec.md` §1.4 for the per-tier deltas). The two tiers in this column are within ~60 GB at production scale because the `maid → maid_hot` saving (~1 TB) is offset by the `aud:` precompute (~1 TB).
+- **Data-size columns:** `Small Test Data` is the logical payload size of the current 4K-MAID / 2.5K-campaign synthetic dataset for that method's required keyspaces. `Scaled-Up Data` is the corresponding logical footprint at 500 M MAIDs / 5 K active ads at the **100 K bid/s** tier (`fcap:` is the only bid-rate-sensitive keyspace; see `reports/full_scale_gcp_test_spec.md` §1.4 for the per-tier deltas). The `maid:` shape is mode-dependent (full ~11 KB / MAID for full-realtime / sinter modes; lean ~9 KB / MAID for hybrid / precomputed modes — see §1.1). Methods come out within ~60 GB of each other at production scale because the lean-mode `maid:` saving (~1 TB) is offset by the `aud:` precompute (~1 TB).
 
 | Mode | Retrieval Shape | Small Test Data | Scaled-Up Data | Avg SINTER Ops | Avg Total Redis Round Trips | Decision Path P50 (ms) | Decision Path P99 (ms) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `full_realtime` | full campaign materialization + live exact targeting + taxonomy_filter | 4.18 MB | 5.22 TB | 0 | 5 | 236.653 | 303.059 |
 | `maid_bruteforce_sinter` | legacy 26-probe SINTER plan | 4.46 MB | 5.22 TB | 26 | 31 | 19.79 | 52.6 |
 | `maid_tightened_sinter` | tightened pipelined SINTER plan | 4.46 MB | 5.22 TB | 3 | 6 | 7.254 | 29.691 |
-| `precomputed_segment` | direct aud:{maid} + maid_hot | 4.62 MB | 5.28 TB | 0 | 6 | 4.537 | 18.18 |
-| `hybrid_precompute_plus_realtime` | direct aud:{maid} + maid_hot + live gating | 4.62 MB | 5.28 TB | 0 | 6 | 4.691 | 42.455 |
-| `hybrid_bitmap_gating` | direct aud:{maid} + maid_hot + bm:servable gate + live fcap hash check | 4.32 MB | 5.28 TB | 0 | 5 | 3.991 | 5.332 |
-| `hybrid_bitmap_taxonomy` | bm:servable gate + live fcap + app-side taxonomy_filter on float scores | 4.32 MB | 5.28 TB | 0 | 5 | 3.723 | 9.916 |
+| `precomputed_segment` | direct aud:{maid} + maid: HMGET (scoring subset) | 4.61 MB | 5.28 TB | 0 | 6 | 4.537 | 18.18 |
+| `hybrid_precompute_plus_realtime` | direct aud:{maid} + maid: HMGET + live gating | 4.61 MB | 5.28 TB | 0 | 6 | 4.691 | 42.455 |
+| `hybrid_bitmap_gating` | direct aud:{maid} + maid: HMGET + bm:servable gate + live fcap hash check | 4.31 MB | 5.28 TB | 0 | 5 | 3.991 | 5.332 |
+| `hybrid_bitmap_taxonomy` | maid: HMGET + bm:servable gate + live fcap + app-side taxonomy_filter on float scores | 4.31 MB | 5.28 TB | 0 | 5 | 3.723 | 9.916 |
 
 ## Method Definitions
 
@@ -32,11 +32,11 @@ The metric excludes HTTP/framework overhead but includes profile fetch and reran
 - `maid_tightened_sinter`
   Uses the reduced MAID retrieval planner. After identity resolution and full MAID fetch, it issues a compact pipelined `SINTER` plan with only three probes: one per strong segment plus a strict base fallback.
 - `precomputed_segment`
-  Resolves the identity token, fetches a compact `maid_hot:{maid_id}` scoring profile, reads the precomputed `aud:{maid_id}` candidate list, then fetches campaign/state data plus a single per-MAID `fcap:{maid_id}` hash and reranks. It relies on batch-computed static targeting and only applies minimal live gating online.
+  Resolves the identity token, HMGETs the scoring subset of `maid:{maid_id}` (user_id, interests_json, impression_count), reads the precomputed `aud:{maid_id}` candidate list, then fetches campaign/state data plus a single per-MAID `fcap:{maid_id}` hash and reranks. It relies on batch-computed static targeting and only applies minimal live gating online.
 - `hybrid_precompute_plus_realtime`
-  Uses the same `maid_hot:{maid_id}` and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.
+  Uses the same `maid:{maid_id}` HMGET and `aud:{maid_id}` lookup path as precomputed mode, but preserves the live mutable gating stage for pacing, budget, and frequency before reranking. It still reads a single per-MAID `fcap:{maid_id}` hash online. This is the current production-shaped non-bitmap path.
 - `hybrid_bitmap_gating`
-  Uses `maid_hot:{maid_id}` and `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.
+  HMGETs the scoring subset of `maid:{maid_id}` and reads `aud:{maid_id}`, then applies a server-side bitmap gate against a single `bm:servable` bitmap before fetching campaign metadata. Frequency cap is still enforced live from the per-MAID `fcap:{maid_id}` hash before reranking.
 - `hybrid_bitmap_taxonomy`
   Same retrieval and bitmap-gating path as `hybrid_bitmap_gating`, but additionally evaluates each surviving campaign's `taxonomy_filter` AND/OR/NOT expression against the MAID's float interest scores in app memory before reranking. This is the path that closes the gap between batch precompute and per-ad threshold-based targeting on continuous taxonomy scores.
 - `full_realtime`
